@@ -32,6 +32,7 @@ from utils.display import (
     game_embed, stats_embed, leaderboard_embed,
     daily_results_embed, server_stats_embed, history_embed, help_embed,
 )
+from utils.board_image import board_file
 from game.wordle import WordleGame, EntropyEntry
 
 
@@ -207,7 +208,9 @@ class WordleView(discord.ui.View):
         embed.description = (
             f"🏳️ You gave up.  The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
         )
-        await interaction.response.edit_message(embed=embed, view=_done_view())
+        await interaction.response.edit_message(
+            embed=embed, view=_done_view(), file=board_file(game),
+        )
 
         if isinstance(interaction.channel, discord.Thread):
             await _archive_thread(
@@ -287,12 +290,12 @@ class WordleCog(commands.Cog):
 
         if board_msg:
             try:
-                await board_msg.edit(embed=embed, view=view)
+                await board_msg.edit(embed=embed, view=view, file=board_file(game))
             except (discord.NotFound, discord.Forbidden):
                 board_msg = None
 
         if board_msg is None:
-            new_msg = await thread.send(embed=embed, view=view)
+            new_msg = await thread.send(embed=embed, view=view, file=board_file(game))
             await db.update_thread_info(active["game_id"], str(thread.id), str(new_msg.id))
 
         if not game.is_active:
@@ -352,7 +355,7 @@ class WordleCog(commands.Cog):
             game  = WordleGame.from_db(active)
             embed = game_embed(game, ctx.author.display_name)
             embed.set_footer(text="Couldn't find your game thread — use /wordle board")
-            await ctx.followup.send(embed=embed, view=WordleView(uid, gid), ephemeral=True)
+            await ctx.followup.send(embed=embed, view=WordleView(uid, gid), file=board_file(game), ephemeral=True)
             return
 
         if mode == "daily":
@@ -426,7 +429,7 @@ class WordleCog(commands.Cog):
             "**Type your 5-letter word** — the board updates automatically.\n"
             "Click **🏳️ Give Up** to forfeit."
         )
-        board_msg = await thread.send(embed=embed, view=WordleView(uid, gid))
+        board_msg = await thread.send(embed=embed, view=WordleView(uid, gid), file=board_file(game))
         await db.update_thread_info(game_id, str(thread.id), str(board_msg.id))
 
         await ctx.followup.send(
@@ -483,7 +486,7 @@ class WordleCog(commands.Cog):
             try:
                 thread    = ctx.guild.get_channel_or_thread(int(thread_id))
                 board_msg = await thread.fetch_message(int(board_msg_id))
-                await board_msg.edit(embed=embed, view=view)
+                await board_msg.edit(embed=embed, view=view, file=board_file(game))
                 board_updated = True
                 if not game.is_active:
                     await _archive_thread(
@@ -499,7 +502,7 @@ class WordleCog(commands.Cog):
                 f"✅ Board updated in {mention}", ephemeral=True
             )
         else:
-            await ctx.followup.send(embed=embed, view=view, ephemeral=True)
+            await ctx.followup.send(embed=embed, view=view, file=board_file(game), ephemeral=True)
 
     # ── /wordle board ─────────────────────────────────────────────────────────
 
@@ -530,7 +533,7 @@ class WordleCog(commands.Cog):
         # Thread not found — show board inline
         game  = WordleGame.from_db(active)
         embed = game_embed(game, ctx.author.display_name)
-        await ctx.followup.send(embed=embed, view=WordleView(uid, gid), ephemeral=True)
+        await ctx.followup.send(embed=embed, view=WordleView(uid, gid), file=board_file(game), ephemeral=True)
 
     # ── /wordle giveup ────────────────────────────────────────────────────────
 
@@ -563,7 +566,7 @@ class WordleCog(commands.Cog):
             try:
                 thread    = ctx.guild.get_channel_or_thread(int(thread_id))
                 board_msg = await thread.fetch_message(int(board_msg_id))
-                await board_msg.edit(embed=embed, view=_done_view())
+                await board_msg.edit(embed=embed, view=_done_view(), file=board_file(game))
                 await _archive_thread(thread, won=False, username=ctx.author.display_name)
                 await ctx.followup.send(
                     f"🏳️ Forfeited. Thread archived.", ephemeral=True
@@ -572,7 +575,7 @@ class WordleCog(commands.Cog):
             except Exception:
                 pass
 
-        await ctx.followup.send(embed=embed, ephemeral=True)
+        await ctx.followup.send(embed=embed, file=board_file(game), ephemeral=True)
 
     # ── /wordle stats ─────────────────────────────────────────────────────────
 

@@ -152,7 +152,8 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
     embed = discord.Embed(title=title, colour=colour)
     embed.set_author(name=f"{username} · {mode_tag}")
 
-    embed.add_field(name="Board", value=render_board(game), inline=False)
+    # Board is rendered as an attached PNG — reference it via attachment URL.
+    embed.set_image(url="attachment://board.png")
     embed.add_field(name="Letters", value=render_keyboard(game), inline=False)
 
     if game.entropy_log:

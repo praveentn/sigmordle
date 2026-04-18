@@ -39,23 +39,25 @@ class WordleCog(commands.Cog):
         ctx: discord.ApplicationContext,
         max_guesses: discord.Option(
             int,
-            "Max guesses (2–26, default 6)",
+            "Number of word guesses allowed (default 6, max 10)",
             required=False,
             default=6,
-            min_value=2,
-            max_value=26,
         ),  # type: ignore[valid-type]
         mode: discord.Option(
             str,
-            "daily = shared word · freeplay = random (default daily)",
+            "freeplay = random word (default) · daily = shared word of the day",
             required=False,
-            default="daily",
-            choices=["daily", "freeplay"],
+            default="freeplay",
+            choices=["freeplay", "daily"],
         ),  # type: ignore[valid-type]
     ):
         await ctx.defer(ephemeral=True)
         if not _require_guild(ctx):
             await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        if max_guesses < 1 or max_guesses > 10:
+            await ctx.followup.send("❌ Guesses must be between 1 and 10.", ephemeral=True)
             return
 
         uid  = str(ctx.author.id)
@@ -303,13 +305,14 @@ class WordleCog(commands.Cog):
     async def leaderboard(
         self,
         ctx: discord.ApplicationContext,
-        limit: discord.Option(int, "Entries to show (default 10)", required=False, default=10, min_value=3, max_value=25),  # type: ignore[valid-type]
+        limit: discord.Option(int, "Entries to show (default 10)", required=False, default=10),  # type: ignore[valid-type]
     ):
         await ctx.defer()
         if not _require_guild(ctx):
             await ctx.followup.send("Use this inside a server.")
             return
 
+        limit = max(3, min(limit, 25))
         rows  = await db.get_leaderboard(str(ctx.guild.id), limit)  # type: ignore[union-attr]
         embed = leaderboard_embed(rows, ctx.guild.name)  # type: ignore[union-attr]
         await ctx.followup.send(embed=embed)
@@ -373,13 +376,14 @@ class WordleCog(commands.Cog):
     async def history(
         self,
         ctx: discord.ApplicationContext,
-        limit: discord.Option(int, "Number of games (default 5)", required=False, default=5, min_value=1, max_value=15),  # type: ignore[valid-type]
+        limit: discord.Option(int, "Number of games (default 5)", required=False, default=5),  # type: ignore[valid-type]
     ):
         await ctx.defer(ephemeral=True)
         if not _require_guild(ctx):
             await ctx.followup.send("Use this inside a server.", ephemeral=True)
             return
 
+        limit = max(1, min(limit, 15))
         rows  = await db.get_user_history(str(ctx.author.id), str(ctx.guild.id), limit)  # type: ignore[union-attr]
         embed = history_embed(rows, ctx.author.display_name)
         await ctx.followup.send(embed=embed, ephemeral=True)

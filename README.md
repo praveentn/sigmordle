@@ -1,0 +1,2 @@
+# sigmordle
+Sigmoid Wordle

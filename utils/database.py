@@ -77,6 +77,8 @@ _MIGRATIONS = [
     ("user_stats",   "total_time_seconds", "INTEGER DEFAULT 0"),
     ("game_history", "elapsed_seconds",    "INTEGER DEFAULT 0"),
     ("game_history", "entropy_log",        "TEXT DEFAULT '[]'"),
+    ("wordle_games", "thread_id",          "TEXT"),
+    ("wordle_games", "board_message_id",   "TEXT"),
 ]
 
 
@@ -119,6 +121,15 @@ async def create_game(
         )
         await db.commit()
         return cur.lastrowid  # type: ignore[return-value]
+
+
+async def update_thread_info(game_id: int, thread_id: str, board_message_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE wordle_games SET thread_id=?, board_message_id=? WHERE game_id=?",
+            (thread_id, board_message_id, game_id),
+        )
+        await db.commit()
 
 
 async def update_game(game_id: int, guesses: str, patterns: str, entropy_log: str, status: str) -> None:

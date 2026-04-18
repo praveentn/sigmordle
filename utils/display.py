@@ -14,9 +14,14 @@ from game.wordle import WordleGame, EntropyEntry
 GREEN  = discord.Colour.green()
 YELLOW = discord.Colour.gold()
 RED    = discord.Colour.red()
-BLUE   = discord.Colour(0x5865F2)   # Discord blurple
+BLUE   = discord.Colour(0x5865F2)
 GREY   = discord.Colour.greyple()
 ORANGE = discord.Colour.orange()
+
+_TILE   = {CORRECT: "🟩", PRESENT: "🟨", ABSENT: "⬛"}
+_NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+_BAR_WIDTH = 12
+_MAX_BITS  = math.log2(5917)   # ~12.5 — theoretical max for our word list
 
 
 def _medal(rank: int) -> str:
@@ -24,9 +29,7 @@ def _medal(rank: int) -> str:
 
 
 def _pct(num: int, denom: int) -> str:
-    if denom == 0:
-        return "0%"
-    return f"{round(100 * num / denom)}%"
+    return "0%" if denom == 0 else f"{round(100 * num / denom)}%"
 
 
 def _fmt_time(seconds: int) -> str:
@@ -44,14 +47,6 @@ def _bar(count: int, max_count: int, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-# ── Row number helpers ────────────────────────────────────────────────────────
-
-_NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-_EMPTY_TILE = "⬜⬜⬜⬜⬜"
-_BAR_WIDTH  = 12
-_MAX_BITS   = math.log2(5917)   # ~12.5 — theoretical max for our word list
-
-
 def _row_num(i: int) -> str:
     return _NUM_EMOJI[i] if i < len(_NUM_EMOJI) else f"`{i + 1}.`"
 
@@ -64,49 +59,77 @@ def _entropy_bar(bits: float) -> str:
 # ── Board renderer ────────────────────────────────────────────────────────────
 
 def render_board(game: WordleGame) -> str:
+    """Each guessed row shows colored square + letter per tile: 🟩C 🟨R ⬛A ⬛N ⬛E"""
     lines: list[str] = []
     for i, (guess, pat) in enumerate(zip(game.guesses, game.patterns)):
-        emoji_row = pattern_to_emoji(pat)
-        lines.append(f"{_row_num(i)} {emoji_row}  `{guess}`")
+        tiles = " ".join(f"{_TILE[p]}{ch}" for p, ch in zip(pat, guess))
+        lines.append(f"{_row_num(i)} {tiles}")
     for i in range(len(game.guesses), game.max_guesses):
-        lines.append(f"{_row_num(i)} {_EMPTY_TILE}")
+        lines.append(f"{_row_num(i)} " + " ".join(["⬜"] * 5))
     return "\n".join(lines)
 
 
-def render_keyboard(game: WordleGame) -> str:
-    correct, present, absent, untried = build_keyboard_lines(game.guesses, game.patterns)
-    parts: list[str] = []
-    if correct:
-        parts.append(f"🟩 **{correct}**")
-    if present:
-        parts.append(f"🟨 **{present}**")
-    if absent:
-        parts.append(f"⬛ ~~{absent}~~")
-    if untried:
-        parts.append(f"⬜ {untried}")
-    return "\n".join(parts) or "⬜ A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"
+# ── Letter-state renderer ─────────────────────────────────────────────────────
 
+def render_keyboard(game: WordleGame) -> str:
+    """
+    Row 1: 5-slot position view — known letters in their exact position, ⬜ for unknowns.
+    Row 2: 🟨-prefixed letters found but wrong position, in word-discovery order.
+    Row 3: ⬛-prefixed letters confirmed absent, alphabetical.
+    Row 4: untried letters in italic, alphabetical.
+    """
+    correct_slots, present_ordered, absent_sorted, untried_sorted = build_keyboard_lines(
+        game.guesses, game.patterns
+    )
+
+    lines: list[str] = []
+
+    # Position row — always shown
+    pos = " ".join(f"🟩{ch}" if ch else "⬜" for ch in correct_slots)
+    lines.append(pos)
+
+    if present_ordered:
+        lines.append(" ".join(f"🟨{ch}" for ch in present_ordered))
+
+    if absent_sorted:
+        lines.append(" ".join(f"⬛{ch}" for ch in absent_sorted))
+
+    if untried_sorted:
+        lines.append(f"_{' '.join(untried_sorted)}_")
+
+    return "\n".join(lines)
+
+
+# ── Entropy renderer ──────────────────────────────────────────────────────────
 
 def render_entropy(log: list[EntropyEntry]) -> str:
+    """
+    Per-guess row: word  quality-emoji  progress-bar  actual-bits  word-count-narrowing
+    🟢 actual ≥ expected + 0.2  (above average)
+    🟡 within ±0.5 of expected  (on par)
+    🔴 actual ≤ expected − 0.5  (below average / unlucky)
+    """
     if not log:
-        return "*No guesses yet — make your first guess!*"
+        return "*No guesses yet*"
 
     lines: list[str] = []
     for i, e in enumerate(log):
         bar   = _entropy_bar(e.actual_bits)
         delta = e.actual_bits - e.expected_bits
-        sign  = "+" if delta >= 0 else ""
+        quality = "🟢" if delta >= 0.2 else ("🔴" if delta <= -0.5 else "🟡")
         lines.append(
-            f"{_row_num(i)} `{e.guess}` `{bar}` **{e.actual_bits:.2f}b**"
-            f"  _{e.n_before:,}→{e.n_after:,} words_ ({sign}{delta:.2f} vs exp)"
+            f"{_row_num(i)} `{e.guess}` {quality} `{bar}`"
+            f" **{e.actual_bits:.1f}b**  _{e.n_before:,}→{e.n_after:,}_"
         )
 
     total_actual   = sum(e.actual_bits for e in log)
     total_expected = sum(e.expected_bits for e in log)
-    last_n         = log[-1].n_after
+    remaining      = log[-1].n_after
+    sep = "`" + "━" * (_BAR_WIDTH + 6) + "`"
+    lines.append(sep)
     lines.append(
-        f"\n**Total: {total_actual:.2f} bits** _(expected {total_expected:.2f})_"
-        f"  ·  **{last_n:,}** word{'s' if last_n != 1 else ''} remaining"
+        f"**{total_actual:.1f}b** _(exp {total_expected:.1f})_"
+        f"  ·  **{remaining:,}** word{'s' if remaining != 1 else ''} left"
     )
     return "\n".join(lines)
 
@@ -119,10 +142,10 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
         title  = f"🎉 Solved in {game.num_guesses}/{game.max_guesses}!"
     elif game.is_lost:
         colour = RED
-        title  = f"😔 Better luck next time! The word was **{game.target}**"
+        title  = f"😔 The word was **{game.target}**"
     else:
+        left  = game.remaining_guesses
         colour = BLUE
-        left   = game.remaining_guesses
         title  = f"🟩 Sigmordle — {left} guess{'es' if left != 1 else ''} left"
 
     mode_tag = "📅 Daily" if game.mode == "daily" else "🎲 Free Play"
@@ -134,7 +157,7 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
 
     if game.entropy_log:
         embed.add_field(
-            name="📐 Entropy per Guess",
+            name="📐 Entropy",
             value=render_entropy(game.entropy_log),
             inline=False,
         )
@@ -142,9 +165,9 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
     if game.is_won:
         embed.set_footer(text=f"Game #{game.game_id} · {game.mode}")
     elif game.is_lost:
-        embed.set_footer(text=f"Game #{game.game_id} — try /wordle play again tomorrow!")
+        embed.set_footer(text=f"Game #{game.game_id} — try /wordle play again!")
     else:
-        embed.set_footer(text=f"Game #{game.game_id} · Use /wordle guess <word>")
+        embed.set_footer(text=f"Game #{game.game_id} · {game.mode} · Type your 5-letter guess in this thread")
 
     return embed
 
@@ -152,22 +175,21 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
 # ── Stats embed ───────────────────────────────────────────────────────────────
 
 def stats_embed(row: dict, username: str) -> discord.Embed:
-    played   = row["games_played"]
-    won      = row["games_won"]
-    pts      = row["total_points"]
-    streak   = row["current_streak"]
-    max_str  = row["max_streak"]
-    dist     = json.loads(row["guess_dist"])
-    sw_raw   = json.loads(row["starting_words"])
+    played  = row["games_played"]
+    won     = row["games_won"]
+    pts     = row["total_points"]
+    streak  = row["current_streak"]
+    max_str = row["max_streak"]
+    dist    = json.loads(row["guess_dist"])
+    sw_raw  = json.loads(row["starting_words"])
 
     win_rate = _pct(won, played)
     avg_pts  = f"{pts / played:.1f}" if played else "0"
 
-    embed = discord.Embed(title=f"📊 Stats — {username}", colour=BLUE)
-
     total_time = row.get("total_time_seconds", 0) or 0
     avg_time   = _fmt_time(total_time // won) if won else "—"
 
+    embed = discord.Embed(title=f"📊 Stats — {username}", colour=BLUE)
     overview = (
         f"🎮 Games Played: **{played}**\n"
         f"✅ Won: **{won}** ({win_rate})\n"
@@ -177,20 +199,18 @@ def stats_embed(row: dict, username: str) -> discord.Embed:
     )
     embed.add_field(name="Overview", value=overview, inline=False)
 
-    # Guess distribution bar chart
     if dist:
         max_count = max(dist.values(), default=1)
         bars: list[str] = []
         for g in sorted(dist.keys(), key=int):
-            c    = dist[g]
-            bar  = _bar(c, max_count)
+            c   = dist[g]
+            bar = _bar(c, max_count)
             bars.append(f"`{g}` {bar} {c}")
         embed.add_field(name="Guess Distribution", value="\n".join(bars), inline=False)
 
-    # Starting words breakdown
     if sw_raw:
-        ctr     = Counter(sw_raw)
-        top5    = ctr.most_common(5)
+        ctr   = Counter(sw_raw)
+        top5  = ctr.most_common(5)
         sw_text = "  ".join(f"`{w}` ×{n}" for w, n in top5)
         embed.add_field(name="Favourite Openers", value=sw_text, inline=False)
 
@@ -201,10 +221,7 @@ def stats_embed(row: dict, username: str) -> discord.Embed:
 # ── Leaderboard embed ─────────────────────────────────────────────────────────
 
 def leaderboard_embed(rows: list[dict], guild_name: str) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"🏆 Leaderboard — {guild_name}",
-        colour=ORANGE,
-    )
+    embed = discord.Embed(title=f"🏆 Leaderboard — {guild_name}", colour=ORANGE)
 
     if not rows:
         embed.description = "*No games played yet. Use `/wordle play` to start!*"
@@ -226,7 +243,7 @@ def leaderboard_embed(rows: list[dict], guild_name: str) -> discord.Embed:
         )
 
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Points: Guess 1=10 · 2=7 · 3=5 · 4=3 · 5=2 · 6=1 + streak bonus  ·  tiebreak: fastest avg")
+    embed.set_footer(text="Points: 1 guess=10 · 2=7 · 3=5 · 4=3 · 5=2 · 6=1 + streak bonus  ·  tiebreak: fastest avg")
     return embed
 
 
@@ -239,10 +256,7 @@ def daily_results_embed(
     game_date: str,
     show_word: bool = True,
 ) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"📅 Daily Word Results — {game_date}",
-        colour=BLUE,
-    )
+    embed = discord.Embed(title=f"📅 Daily Results — {game_date}", colour=BLUE)
 
     if show_word:
         embed.description = f"Today's word: **`{word}`**"
@@ -261,20 +275,17 @@ def daily_results_embed(
         for i, r in enumerate(solved):
             g   = r["num_guesses"]
             pts = r["points"]
+            t   = _fmt_time(r.get("elapsed_seconds") or 0)
             lines.append(
-                f"{_medal(i)} **{r['username']}** — {g} guess{'es' if g != 1 else ''} (+{pts} pts)"
+                f"{_medal(i)} **{r['username']}** — {g} guess{'es' if g != 1 else ''}"
+                f"  (+{pts} pts)  ⏱ {t}"
             )
         embed.add_field(name=f"✅ Solved ({len(solved)})", value="\n".join(lines[:15]), inline=False)
 
     if failed:
         fail_names = ", ".join(r["username"] for r in failed[:10])
-        embed.add_field(
-            name=f"❌ Did Not Solve ({len(failed)})",
-            value=fail_names or "—",
-            inline=False,
-        )
+        embed.add_field(name=f"❌ Did Not Solve ({len(failed)})", value=fail_names or "—", inline=False)
 
-    # Entropy comparison across all players
     all_elog = []
     for r in rows:
         try:
@@ -284,13 +295,17 @@ def daily_results_embed(
             pass
 
     if len(all_elog) >= 2:
-        # Average bits gained on guess 1
         g1_bits = [e[0]["actual_bits"] for e in all_elog if e]
         if g1_bits:
             avg_g1 = sum(g1_bits) / len(g1_bits)
+            best   = max(g1_bits)
             embed.add_field(
-                name="📐 Server Entropy (Guess 1 avg)",
-                value=f"Average info gain: **{avg_g1:.2f} bits** across {len(g1_bits)} players",
+                name="📐 Opening Entropy (Guess 1)",
+                value=(
+                    f"Server avg: **{avg_g1:.2f}b**  ·  "
+                    f"Best: **{best:.2f}b**  ·  "
+                    f"Players: **{len(g1_bits)}**"
+                ),
                 inline=False,
             )
 
@@ -298,8 +313,7 @@ def daily_results_embed(
     avg_guesses  = sum(r["num_guesses"] for r in solved) / len(solved) if solved else 0
     embed.set_footer(
         text=(
-            f"{guild_name} · {total_played} played · "
-            f"{len(solved)} solved · "
+            f"{guild_name} · {total_played} played · {len(solved)} solved · "
             + (f"avg {avg_guesses:.1f} guesses" if solved else "nobody solved yet")
         )
     )
@@ -316,21 +330,21 @@ def server_stats_embed(
 ) -> discord.Embed:
     embed = discord.Embed(title=f"🌐 Server Stats — {guild_name}", colour=ORANGE)
 
-    if stats:
-        total_g  = stats["total_games"]
-        total_w  = stats["total_wins"]
-        s_streak = stats["server_streak"]
-        max_s    = stats["max_server_streak"]
-        wr       = _pct(total_w, total_g)
-        overview = (
-            f"🎮 Total Games: **{total_g}**\n"
-            f"✅ Total Wins: **{total_w}** ({wr})\n"
-            f"🔥 Current Streak: **{s_streak}**  |  Best: **{max_s}**"
-        )
-        embed.add_field(name="Overview", value=overview, inline=False)
-    else:
+    if not stats:
         embed.description = "*No games yet! Use `/wordle play` to start.*"
         return embed
+
+    total_g  = stats["total_games"]
+    total_w  = stats["total_wins"]
+    s_streak = stats["server_streak"]
+    max_s    = stats["max_server_streak"]
+    wr       = _pct(total_w, total_g)
+    overview = (
+        f"🎮 Total Games: **{total_g}**\n"
+        f"✅ Total Wins: **{total_w}** ({wr})\n"
+        f"🔥 Current Streak: **{s_streak}**  |  Best: **{max_s}**"
+    )
+    embed.add_field(name="Overview", value=overview, inline=False)
 
     if word_stats:
         lines: list[str] = []
@@ -364,8 +378,8 @@ def history_embed(rows: list[dict], username: str) -> discord.Embed:
         target  = r["target"] if r["won"] else "?????"
         elapsed = _fmt_time(r.get("elapsed_seconds") or 0)
         lines.append(
-            f"{status} {mode} **{target}** — {r['num_guesses']} guess{'es' if r['num_guesses'] != 1 else ''} "
-            f"| +{r['points']} pts | ⏱ {elapsed} | {r['game_date'] or r['played_at'][:10]}"
+            f"{status} {mode} **{target}** — {r['num_guesses']} guess{'es' if r['num_guesses'] != 1 else ''}"
+            f" | +{r['points']} pts | ⏱ {elapsed} | {r['game_date'] or r['played_at'][:10]}"
         )
 
     embed.description = "\n".join(lines)
@@ -381,24 +395,24 @@ def help_embed() -> discord.Embed:
         colour=GREEN,
         description=(
             "Guess the hidden 5-letter word. After each guess you get colour feedback:\n\n"
-            "🟩 **Green** — correct letter, correct position\n"
-            "🟨 **Yellow** — correct letter, wrong position\n"
-            "⬛ **Black** — letter not in the word\n\n"
+            "🟩**C** — correct letter, correct position\n"
+            "🟨**R** — correct letter, wrong position\n"
+            "⬛**N** — letter not in the word\n\n"
             "**Daily mode** — one shared word per day (builds streaks & server stats)\n"
             "**Free play** — fresh random word anytime\n\n"
             "**Scoring** (base points per game):\n"
             "`1 guess` → **10 pts** · `2` → **7** · `3` → **5** · `4` → **3** · `5` → **2** · `6+` → **1**\n"
             "🔥 Daily win streaks award up to **+5 bonus points**\n\n"
-            "**Entropy** shows how much information each guess reveals (in bits). "
-            "Higher is better — a perfect guess could eliminate half the remaining words."
+            "**Entropy** 📐 — bits of information each guess reveals. "
+            "🟢 above expected · 🟡 on par · 🔴 below expected."
         ),
     )
     embed.add_field(
         name="Commands",
         value=(
             "`/wordle play [max_guesses] [mode]` — start a game\n"
-            "`/wordle guess <word>` — submit a guess\n"
-            "`/wordle board` — show your current board\n"
+            "`/wordle guess <word>` — submit a guess (slash fallback)\n"
+            "`/wordle board` — find your active game thread\n"
             "`/wordle giveup` — reveal the word and end\n"
             "`/wordle stats [user]` — your stats\n"
             "`/wordle leaderboard` — server leaderboard\n"
@@ -406,6 +420,16 @@ def help_embed() -> discord.Embed:
             "`/wordle server` — server-wide stats\n"
             "`/wordle history` — your recent games\n"
             "`/wordle help` — this message"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="How to play",
+        value=(
+            "Run `/wordle play` — a **private thread** opens just for you.\n"
+            "Type your 5-letter word directly in the thread.\n"
+            "The board updates automatically after each guess.\n"
+            "Click **🏳️ Give Up** to reveal the word and forfeit."
         ),
         inline=False,
     )

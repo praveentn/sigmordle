@@ -115,15 +115,37 @@ def letter_states(guesses: list[str], patterns: list[tuple[int, ...]]) -> dict[s
     return states
 
 
-def build_keyboard_lines(guesses: list[str], patterns: list[tuple[int, ...]]) -> tuple[str, str, str, str]:
-    """Return (correct_str, present_str, absent_str, untried_str) for display."""
-    states = letter_states(guesses, patterns)
-    correct  = " ".join(ch for ch, s in states.items() if s == CORRECT)
-    present  = " ".join(ch for ch, s in states.items() if s == PRESENT)
-    absent   = " ".join(ch for ch, s in states.items() if s == ABSENT)
-    tried    = set(states.keys())
-    untried  = " ".join(ch for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if ch not in tried)
-    return correct, present, absent, untried
+def build_keyboard_lines(
+    guesses: list[str], patterns: list[tuple[int, ...]]
+) -> tuple[list, list[str], list[str], list[str]]:
+    """Return (correct_slots[5], present_ordered, absent_sorted, untried_sorted).
+
+    correct_slots: 5-element list; each entry is the confirmed letter or None.
+    present_ordered: letters in wrong position, in word-discovery order.
+    absent_sorted: letters not in the word, alphabetical.
+    untried_sorted: letters not yet guessed, alphabetical.
+    """
+    correct_slots: list = [None] * 5
+    present_ordered: list[str] = []
+    present_seen: set[str] = set()
+    absent_set: set[str] = set()
+    tried: set[str] = set()
+
+    for guess, pattern in zip(guesses, patterns):
+        for i, (ch, p) in enumerate(zip(guess, pattern)):
+            tried.add(ch)
+            if p == CORRECT:
+                correct_slots[i] = ch
+            elif p == PRESENT:
+                if ch not in present_seen:
+                    present_ordered.append(ch)
+                    present_seen.add(ch)
+            elif p == ABSENT:
+                absent_set.add(ch)
+
+    absent_sorted  = sorted(absent_set)
+    untried_sorted = [ch for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if ch not in tried]
+    return correct_slots, present_ordered, absent_sorted, untried_sorted
 
 
 def compute_points(num_guesses: int, max_guesses: int) -> int:

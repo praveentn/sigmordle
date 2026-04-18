@@ -1,22 +1,16 @@
 """
 Sigmordle — Discord Wordle-style game cog.
 
-Modal design note
-─────────────────
-Discord modals always close the moment the user submits — the API provides no
-mechanism to keep them open or update their content.  The workaround used here:
-
-  • Previous guesses are rendered as pre-filled InputText rows with emoji
-    pattern labels (e.g. "2.  🟨⬛🟩⬛⬛  CRANE"), giving the user full board
-    context inside the modal without needing to look elsewhere.
-  • The new-guess InputText placeholder summarises the letter keyboard state
-    (✅ correct · 🟡 present · ❌ absent) so the user knows which letters to
-    avoid / target.
-  • On submit the modal closes (Discord's constraint) and the board embed
-    updates in-place, including any validation errors.
-
-The persistent ephemeral board message is the primary game UI.
-The modal is a clean, focused input layer that shows as much context as fits.
+UX design
+─────────
+• /wordle play  creates a private thread for the player.
+• The board embed lives as the first (pinned) message in that thread and is
+  edited in-place after every guess.
+• The player types their 5-letter guess as a normal message in the thread —
+  no buttons, no modals needed.  The on_message listener picks it up,
+  deletes it (keeps thread clean), and updates the board.
+• A single "🏳️ Give Up" button stays on the board message for forfeit.
+• /wordle guess <word> is kept as a slash-command fallback.
 """
 
 import json
@@ -63,25 +57,7 @@ def _fmt_time(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _guess_label(n: int, pattern, guess: str) -> str:
-    """InputText label for a previous guess row inside the modal."""
-    return f"{n}.  {pattern_to_emoji(pattern)}  {guess}"
-
-
-def _keyboard_placeholder(game: WordleGame) -> str:
-    """Compact keyboard state for the new-guess input placeholder."""
-    states = letter_states(game.guesses, game.patterns)
-    ok    = " ".join(l for l, s in states.items() if s == CORRECT)
-    maybe = " ".join(l for l, s in states.items() if s == PRESENT)
-    nope  = " ".join(l for l, s in states.items() if s == ABSENT)
-    parts = []
-    if ok:    parts.append(f"✅ {ok}")
-    if maybe: parts.append(f"🟡 {maybe}")
-    if nope:  parts.append(f"❌ {nope}")
-    return ("  ·  ".join(parts) or "e.g.  C R A N E")[:100]
-
-
-# ── Core guess logic (shared by modal + slash command) ────────────────────────
+# ── Core guess logic (shared by on_message + slash command) ───────────────────
 
 async def _apply_guess(
     game: WordleGame,
@@ -188,137 +164,55 @@ def _end_embed(game: WordleGame, username: str, points: int, elapsed: int) -> di
     return embed
 
 
-# ── Guess modal ───────────────────────────────────────────────────────────────
-
-class GuessModal(discord.ui.Modal):
-    """
-    Popup word-input modal.
-
-    Shows the last ≤4 guesses as pre-filled, labelled InputText rows so the
-    user can see their board history inside the modal.  The final row is the
-    editable guess input; its placeholder shows the current letter-state summary.
-
-    Discord closes modals on every submit — this is an API-level constraint with
-    no workaround.  Board errors and results update the persistent embed instead.
-    """
-
-    def __init__(self, game: WordleGame, user_id: str, guild_id: str, created_at: str):
-        num   = game.num_guesses + 1
-        max_g = game.max_guesses
-        super().__init__(title=f"🟩 Sigmordle  ·  Word {num} of {max_g}")
-        self.user_id    = user_id
-        self.guild_id   = guild_id
-        self.created_at = created_at
-
-        # Previous guess rows — show at most 4 (modal cap = 5 total items)
-        recent    = list(zip(game.guesses, game.patterns))[-4:]
-        start_idx = len(game.guesses) - len(recent)
-
-        for i, (guess, pattern) in enumerate(recent):
-            self.add_item(discord.ui.InputText(
-                label=_guess_label(start_idx + i + 1, pattern, guess),
-                value=guess,
-                min_length=5,
-                max_length=5,
-                required=False,
-                style=discord.InputTextStyle.short,
-            ))
-
-        # New-guess input — placeholder shows letter-state summary
-        self.add_item(discord.ui.InputText(
-            label=f"Your word  ({max_g - game.num_guesses} guess{'es' if max_g - game.num_guesses != 1 else ''} left):",
-            placeholder=_keyboard_placeholder(game),
-            min_length=5,
-            max_length=5,
-            required=True,
-            style=discord.InputTextStyle.short,
-        ))
-
-    async def callback(self, interaction: discord.Interaction):
-        word = self.children[-1].value.strip().upper()
-
-        # Re-fetch game (another tab / device might have moved it)
-        active = await db.get_active_game(self.user_id, self.guild_id)
-        if not active:
-            await interaction.response.send_message("❌ No active game found.", ephemeral=True)
-            return
-
-        game = WordleGame.from_db(active)
-        err  = game.validate(word)
-
-        if err:
-            # Show the error on the board embed; button stays active
-            embed = game_embed(game, interaction.user.display_name)
-            embed.set_footer(text=f"❌  {err}  —  click  ✏️ Guess a Word  to try again")
-            await interaction.response.edit_message(
-                embed=embed,
-                view=WordleView(self.user_id, self.guild_id, game.remaining_guesses),
-            )
-            return
-
-        points, elapsed = await _apply_guess(
-            game, word, self.user_id, self.guild_id,
-            interaction.user.display_name, active.get("created_at", ""),
-        )
-
-        if not game.is_active:
-            embed = _end_embed(game, interaction.user.display_name, points, elapsed)
-            await interaction.response.edit_message(embed=embed, view=_done_view())
-        else:
-            embed = game_embed(game, interaction.user.display_name)
-            await interaction.response.edit_message(
-                embed=embed,
-                view=WordleView(self.user_id, self.guild_id, game.remaining_guesses),
-            )
+async def _archive_thread(
+    thread: discord.Thread, won: bool, username: str, num_guesses: int = 0
+) -> None:
+    """Rename and archive the game thread to reflect the result."""
+    try:
+        name = f"✅ {username} ({num_guesses} guesses)" if won else f"❌ {username}"
+        await thread.edit(name=name[:100], archived=True)
+    except Exception:
+        pass
 
 
-# ── Persistent view (board buttons) ──────────────────────────────────────────
+# ── Persistent view (Give Up button only) ────────────────────────────────────
 
 def _done_view() -> discord.ui.View:
-    """Empty view replaces buttons when a game ends."""
     return discord.ui.View()
 
 
 class WordleView(discord.ui.View):
-    def __init__(self, user_id: str, guild_id: str, remaining: int):
+    def __init__(self, user_id: str, guild_id: str):
         super().__init__(timeout=3600)
-        self.user_id   = user_id
-        self.guild_id  = guild_id
-        self.remaining = remaining
-        # Dynamic label showing remaining guesses on the primary button
-        self.children[0].label = f"Guess a Word  ({remaining} left)"
+        self.user_id  = user_id
+        self.guild_id = guild_id
 
     def _not_owner(self, interaction: discord.Interaction) -> bool:
         return str(interaction.user.id) != self.user_id
 
-    @discord.ui.button(label="Guess a Word", style=discord.ButtonStyle.primary, emoji="✏️", row=0)
-    async def guess_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self._not_owner(interaction):
-            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
-            return
-        active = await db.get_active_game(self.user_id, self.guild_id)
-        if not active:
-            await interaction.response.send_message("No active game.", ephemeral=True)
-            return
-        game = WordleGame.from_db(active)
-        await interaction.response.send_modal(
-            GuessModal(game, self.user_id, self.guild_id, active.get("created_at", ""))
-        )
-
-    @discord.ui.button(label="Give Up", style=discord.ButtonStyle.danger, emoji="🏳️", row=0)
+    @discord.ui.button(label="Give Up", style=discord.ButtonStyle.danger, emoji="🏳️")
     async def giveup_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
         if self._not_owner(interaction):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
-        game, elapsed = await _do_giveup(self.user_id, self.guild_id, interaction.user.display_name)
+
+        game, elapsed = await _do_giveup(
+            self.user_id, self.guild_id, interaction.user.display_name
+        )
         if not game:
             await interaction.response.send_message("No active game.", ephemeral=True)
             return
+
         embed = game_embed(game, interaction.user.display_name)
         embed.description = (
             f"🏳️ You gave up.  The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
         )
         await interaction.response.edit_message(embed=embed, view=_done_view())
+
+        if isinstance(interaction.channel, discord.Thread):
+            await _archive_thread(
+                interaction.channel, won=False, username=interaction.user.display_name
+            )
 
     async def on_timeout(self):
         for item in self.children:
@@ -330,23 +224,107 @@ class WordleView(discord.ui.View):
 class WordleCog(commands.Cog):
     wordle = SlashCommandGroup("wordle", "Sigmordle — daily word guessing game")
 
+    # ── Message-based guess input ─────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        if message.guild is None:
+            return
+        if not isinstance(message.channel, discord.Thread):
+            return
+
+        word = message.content.strip().upper()
+        if not (len(word) == 5 and word.isalpha()):
+            return
+
+        uid = str(message.author.id)
+        gid = str(message.guild.id)
+
+        active = await db.get_active_game(uid, gid)
+        if not active:
+            return
+        if str(active.get("thread_id", "")) != str(message.channel.id):
+            return
+
+        # Delete the guess to keep the thread clean
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+        game = WordleGame.from_db(active)
+        err  = game.validate(word)
+
+        if err:
+            await message.channel.send(f"❌ **{word}** — {err}", delete_after=5)
+            return
+
+        points, elapsed = await _apply_guess(
+            game, word, uid, gid, message.author.display_name,
+            active.get("created_at", ""),
+        )
+
+        # Build updated embed + view
+        if game.is_active:
+            embed = game_embed(game, message.author.display_name)
+            view  = WordleView(uid, gid)
+        else:
+            embed = _end_embed(game, message.author.display_name, points, elapsed)
+            view  = _done_view()
+
+        # Edit the pinned board message
+        thread      = message.channel
+        board_msg_id = active.get("board_message_id")
+        board_msg   = None
+
+        if board_msg_id:
+            try:
+                board_msg = await thread.fetch_message(int(board_msg_id))
+            except (discord.NotFound, ValueError):
+                board_msg = None
+
+        if board_msg:
+            try:
+                await board_msg.edit(embed=embed, view=view)
+            except (discord.NotFound, discord.Forbidden):
+                board_msg = None
+
+        if board_msg is None:
+            new_msg = await thread.send(embed=embed, view=view)
+            await db.update_thread_info(active["game_id"], str(thread.id), str(new_msg.id))
+
+        if not game.is_active:
+            await _archive_thread(
+                thread, game.is_won, message.author.display_name, game.num_guesses
+            )
+
     # ── /wordle play ──────────────────────────────────────────────────────────
+
     @wordle.command(name="play", description="Start a Sigmordle game")
     async def play(
         self,
         ctx: discord.ApplicationContext,
         max_guesses: discord.Option(
-            int, "Number of word guesses allowed (default 6)",
+            int, "Number of guesses allowed (default 6)",
             required=False, default=6,
         ),  # type: ignore[valid-type]
         mode: discord.Option(
-            str, "freeplay = random word (default)  ·  daily = shared word of the day",
+            str, "freeplay = random word  ·  daily = shared word of the day",
             required=False, default="freeplay", choices=["freeplay", "daily"],
         ),  # type: ignore[valid-type]
     ):
         await ctx.defer(ephemeral=True)
+
         if ctx.guild is None:
             await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.followup.send(
+                "❌ Games can only be started in a regular text channel.", ephemeral=True
+            )
             return
 
         if max_guesses < 1 or max_guesses > 10:
@@ -358,13 +336,23 @@ class WordleCog(commands.Cog):
         cid   = str(ctx.channel.id)
         today = _today()
 
-        # Resume active game if one exists
+        # Resume active game — link back to the existing thread
         active = await db.get_active_game(uid, gid)
         if active:
+            thread_id = active.get("thread_id")
+            if thread_id:
+                thread = ctx.guild.get_channel_or_thread(int(thread_id))
+                if thread:
+                    await ctx.followup.send(
+                        f"You already have an active game!  →  {thread.mention}",
+                        ephemeral=True,
+                    )
+                    return
+            # Thread gone — fall through to show inline board
             game  = WordleGame.from_db(active)
             embed = game_embed(game, ctx.author.display_name)
-            embed.set_footer(text="You already have an active game — click ✏️ Guess a Word below.")
-            await ctx.followup.send(embed=embed, view=WordleView(uid, gid, game.remaining_guesses), ephemeral=True)
+            embed.set_footer(text="Couldn't find your game thread — use /wordle board")
+            await ctx.followup.send(embed=embed, view=WordleView(uid, gid), ephemeral=True)
             return
 
         if mode == "daily":
@@ -386,19 +374,68 @@ class WordleCog(commands.Cog):
             status="active", max_guesses=max_guesses, mode=mode, entropy_log=[],
         )
 
+        # Create private thread for this game
+        mode_emoji = "📅" if mode == "daily" else "🎲"
+        thread_name = f"{mode_emoji} Wordle — {ctx.author.display_name}"
+        thread = None
+
+        try:
+            thread = await ctx.channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                auto_archive_duration=1440,
+                invitable=False,
+            )
+            try:
+                await thread.add_user(ctx.author)
+            except discord.HTTPException:
+                pass
+        except discord.Forbidden:
+            await ctx.followup.send(
+                "❌ I need the **Create Private Threads** permission here.\n"
+                "Ask a server admin to grant it, or try a different channel.",
+                ephemeral=True,
+            )
+            await db.update_game(game_id, "[]", "[]", "[]", "cancelled")
+            return
+        except discord.HTTPException:
+            # Fall back to public thread via a starter message
+            try:
+                starter = await ctx.channel.send(
+                    f"🎮 **{ctx.author.display_name}** started a Wordle game!"
+                )
+                thread = await starter.create_thread(
+                    name=thread_name,
+                    auto_archive_duration=1440,
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                await ctx.followup.send(
+                    "❌ Couldn't create a game thread in this channel. "
+                    "Make sure the bot has **Create Threads** permission.",
+                    ephemeral=True,
+                )
+                await db.update_game(game_id, "[]", "[]", "[]", "cancelled")
+                return
+
+        # Send board inside the thread
         mode_tag = "📅 Daily" if mode == "daily" else "🎲 Free Play"
-        embed    = game_embed(game, ctx.author.display_name)
+        embed = game_embed(game, ctx.author.display_name)
         embed.description = (
             f"🎮 **{mode_tag} — game on!**\n"
-            f"Guess the hidden 5-letter word in **{max_guesses}** tries.\n\n"
-            "Click **✏️ Guess a Word** — a popup appears where you type your guess.\n"
-            "Your previous guesses are shown inside the popup for reference.\n"
-            "_You can also use `/wordle guess <word>` if you prefer commands._"
+            f"Guess the hidden 5-letter word in **{max_guesses}** {'try' if max_guesses == 1 else 'tries'}.\n\n"
+            "**Type your 5-letter word** — the board updates automatically.\n"
+            "Click **🏳️ Give Up** to forfeit."
         )
-        await ctx.followup.send(embed=embed, view=WordleView(uid, gid, max_guesses), ephemeral=True)
+        board_msg = await thread.send(embed=embed, view=WordleView(uid, gid))
+        await db.update_thread_info(game_id, str(thread.id), str(board_msg.id))
 
-    # ── /wordle guess (text fallback) ─────────────────────────────────────────
-    @wordle.command(name="guess", description="Type a word directly (alternative to the board button)")
+        await ctx.followup.send(
+            f"🎮 Your game is ready!  →  {thread.mention}", ephemeral=True
+        )
+
+    # ── /wordle guess (slash fallback) ────────────────────────────────────────
+
+    @wordle.command(name="guess", description="Submit a guess (alternative to typing in the thread)")
     async def guess(
         self,
         ctx: discord.ApplicationContext,
@@ -430,37 +467,73 @@ class WordleCog(commands.Cog):
             game, word, uid, gid, ctx.author.display_name, active.get("created_at", "")
         )
 
-        if not game.is_active:
-            embed = _end_embed(game, ctx.author.display_name, points, elapsed)
-            await ctx.followup.send(embed=embed, ephemeral=True)
-        else:
+        # Update board message in the thread if possible
+        thread_id    = active.get("thread_id")
+        board_msg_id = active.get("board_message_id")
+
+        if game.is_active:
             embed = game_embed(game, ctx.author.display_name)
+            view  = WordleView(uid, gid)
+        else:
+            embed = _end_embed(game, ctx.author.display_name, points, elapsed)
+            view  = _done_view()
+
+        board_updated = False
+        if thread_id and board_msg_id:
+            try:
+                thread    = ctx.guild.get_channel_or_thread(int(thread_id))
+                board_msg = await thread.fetch_message(int(board_msg_id))
+                await board_msg.edit(embed=embed, view=view)
+                board_updated = True
+                if not game.is_active:
+                    await _archive_thread(
+                        thread, game.is_won, ctx.author.display_name, game.num_guesses
+                    )
+            except Exception:
+                pass
+
+        if board_updated:
+            thread_obj = ctx.guild.get_channel_or_thread(int(thread_id))
+            mention    = thread_obj.mention if thread_obj else "your game thread"
             await ctx.followup.send(
-                embed=embed, view=WordleView(uid, gid, game.remaining_guesses), ephemeral=True
+                f"✅ Board updated in {mention}", ephemeral=True
             )
+        else:
+            await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── /wordle board ─────────────────────────────────────────────────────────
-    @wordle.command(name="board", description="Re-show your current game board with the Guess button")
+
+    @wordle.command(name="board", description="Find your active game thread")
     async def board(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         if ctx.guild is None:
             await ctx.followup.send("Use this inside a server.", ephemeral=True)
             return
 
-        active = await db.get_active_game(str(ctx.author.id), str(ctx.guild.id))
+        uid    = str(ctx.author.id)
+        gid    = str(ctx.guild.id)
+        active = await db.get_active_game(uid, gid)
+
         if not active:
             await ctx.followup.send("No active game. Start one with `/wordle play`.", ephemeral=True)
             return
 
+        thread_id = active.get("thread_id")
+        if thread_id:
+            thread = ctx.guild.get_channel_or_thread(int(thread_id))
+            if thread:
+                await ctx.followup.send(
+                    f"Your active game is in {thread.mention}", ephemeral=True
+                )
+                return
+
+        # Thread not found — show board inline
         game  = WordleGame.from_db(active)
         embed = game_embed(game, ctx.author.display_name)
-        await ctx.followup.send(
-            embed=embed,
-            view=WordleView(str(ctx.author.id), str(ctx.guild.id), game.remaining_guesses),
-            ephemeral=True,
-        )
+        await ctx.followup.send(embed=embed, view=WordleView(uid, gid), ephemeral=True)
 
     # ── /wordle giveup ────────────────────────────────────────────────────────
+
     @wordle.command(name="giveup", description="Reveal the word and forfeit your current game")
     async def giveup(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
@@ -468,16 +541,41 @@ class WordleCog(commands.Cog):
             await ctx.followup.send("Use this inside a server.", ephemeral=True)
             return
 
-        game, elapsed = await _do_giveup(str(ctx.author.id), str(ctx.guild.id), ctx.author.display_name)
+        uid    = str(ctx.author.id)
+        gid    = str(ctx.guild.id)
+        active = await db.get_active_game(uid, gid)
+        if not active:
+            await ctx.followup.send("No active game to forfeit.", ephemeral=True)
+            return
+
+        game, elapsed = await _do_giveup(uid, gid, ctx.author.display_name)
         if not game:
             await ctx.followup.send("No active game to forfeit.", ephemeral=True)
             return
 
         embed = game_embed(game, ctx.author.display_name)
         embed.description = f"🏳️ You gave up. The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
+
+        # Update thread if it exists
+        thread_id    = active.get("thread_id")
+        board_msg_id = active.get("board_message_id")
+        if thread_id and board_msg_id:
+            try:
+                thread    = ctx.guild.get_channel_or_thread(int(thread_id))
+                board_msg = await thread.fetch_message(int(board_msg_id))
+                await board_msg.edit(embed=embed, view=_done_view())
+                await _archive_thread(thread, won=False, username=ctx.author.display_name)
+                await ctx.followup.send(
+                    f"🏳️ Forfeited. Thread archived.", ephemeral=True
+                )
+                return
+            except Exception:
+                pass
+
         await ctx.followup.send(embed=embed, ephemeral=True)
 
     # ── /wordle stats ─────────────────────────────────────────────────────────
+
     @wordle.command(name="stats", description="Show Wordle stats for yourself or another user")
     async def stats(
         self,
@@ -493,7 +591,8 @@ class WordleCog(commands.Cog):
         row = await db.get_user_stats(str(target_user.id), str(ctx.guild.id))
         if not row:
             await ctx.followup.send(
-                f"**{target_user.display_name}** hasn't played any Sigmordle games yet.", ephemeral=True
+                f"**{target_user.display_name}** hasn't played any Sigmordle games yet.",
+                ephemeral=True,
             )
             return
 
@@ -501,6 +600,7 @@ class WordleCog(commands.Cog):
         await ctx.followup.send(embed=embed, ephemeral=True)
 
     # ── /wordle leaderboard ───────────────────────────────────────────────────
+
     @wordle.command(name="leaderboard", description="Show the server Sigmordle leaderboard")
     async def leaderboard(
         self,
@@ -518,6 +618,7 @@ class WordleCog(commands.Cog):
         await ctx.followup.send(embed=embed)
 
     # ── /wordle daily ─────────────────────────────────────────────────────────
+
     @wordle.command(name="daily", description="Show today's daily word results for this server")
     async def daily(self, ctx: discord.ApplicationContext):
         await ctx.defer()
@@ -545,8 +646,8 @@ class WordleCog(commands.Cog):
                 embed.add_field(
                     name="📐 Entropy Comparison (Guess 1)",
                     value=(
-                        f"Server avg: **{avg:.2f} bits**  |  "
-                        f"Best: **{max(all_g1bits):.2f} bits**  |  "
+                        f"Server avg: **{avg:.2f}b**  ·  "
+                        f"Best: **{max(all_g1bits):.2f}b**  ·  "
                         f"Players: **{len(all_g1bits)}**"
                     ),
                     inline=False,
@@ -555,6 +656,7 @@ class WordleCog(commands.Cog):
         await ctx.followup.send(embed=embed)
 
     # ── /wordle server ────────────────────────────────────────────────────────
+
     @wordle.command(name="server", description="Show server-wide Sigmordle statistics")
     async def server(self, ctx: discord.ApplicationContext):
         await ctx.defer()
@@ -570,6 +672,7 @@ class WordleCog(commands.Cog):
         await ctx.followup.send(embed=embed)
 
     # ── /wordle history ───────────────────────────────────────────────────────
+
     @wordle.command(name="history", description="Show your recent Sigmordle games")
     async def history(
         self,
@@ -587,6 +690,7 @@ class WordleCog(commands.Cog):
         await ctx.followup.send(embed=embed, ephemeral=True)
 
     # ── /wordle help ──────────────────────────────────────────────────────────
+
     @wordle.command(name="help", description="How to play Sigmordle")
     async def help(self, ctx: discord.ApplicationContext):
         await ctx.respond(embed=help_embed(), ephemeral=True)

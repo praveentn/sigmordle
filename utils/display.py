@@ -1,4 +1,3 @@
-from __future__ import annotations
 import json
 import math
 from collections import Counter
@@ -6,7 +5,7 @@ from collections import Counter
 import discord
 
 from utils.words import (
-    pattern_to_emoji, build_keyboard_lines, EMPTY_ROW,
+    pattern_to_emoji, build_keyboard_lines,
     CORRECT, PRESENT, ABSENT,
 )
 from game.wordle import WordleGame, EntropyEntry
@@ -35,15 +34,32 @@ def _bar(count: int, max_count: int, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+# ── Row number helpers ────────────────────────────────────────────────────────
+
+_NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+_EMPTY_TILE = "⬜⬜⬜⬜⬜"
+_BAR_WIDTH  = 12
+_MAX_BITS   = math.log2(5917)   # ~12.5 — theoretical max for our word list
+
+
+def _row_num(i: int) -> str:
+    return _NUM_EMOJI[i] if i < len(_NUM_EMOJI) else f"`{i + 1}.`"
+
+
+def _entropy_bar(bits: float) -> str:
+    filled = round(_BAR_WIDTH * min(bits, _MAX_BITS) / _MAX_BITS)
+    return "█" * filled + "░" * (_BAR_WIDTH - filled)
+
+
 # ── Board renderer ────────────────────────────────────────────────────────────
 
 def render_board(game: WordleGame) -> str:
     lines: list[str] = []
-    for guess, pat in zip(game.guesses, game.patterns):
+    for i, (guess, pat) in enumerate(zip(game.guesses, game.patterns)):
         emoji_row = pattern_to_emoji(pat)
-        lines.append(f"{emoji_row}  `{guess}`")
-    remaining = game.max_guesses - len(game.guesses)
-    lines.extend([EMPTY_ROW] * remaining)
+        lines.append(f"{_row_num(i)} {emoji_row}  `{guess}`")
+    for i in range(len(game.guesses), game.max_guesses):
+        lines.append(f"{_row_num(i)} {_EMPTY_TILE}")
     return "\n".join(lines)
 
 
@@ -63,20 +79,25 @@ def render_keyboard(game: WordleGame) -> str:
 
 def render_entropy(log: list[EntropyEntry]) -> str:
     if not log:
-        return "*No guesses yet.*"
+        return "*No guesses yet — make your first guess!*"
+
     lines: list[str] = []
-    for i, e in enumerate(log, 1):
+    for i, e in enumerate(log):
+        bar   = _entropy_bar(e.actual_bits)
         delta = e.actual_bits - e.expected_bits
         sign  = "+" if delta >= 0 else ""
         lines.append(
-            f"**G{i}** `{e.guess}` — {e.n_before:,}→{e.n_after:,} words "
-            f"| **{e.actual_bits:.2f}** bits "
-            f"*(expected {e.expected_bits:.2f}, {sign}{delta:.2f})*"
+            f"{_row_num(i)} `{e.guess}` `{bar}` **{e.actual_bits:.2f}b**"
+            f"  _{e.n_before:,}→{e.n_after:,} words_ ({sign}{delta:.2f} vs exp)"
         )
+
     total_actual   = sum(e.actual_bits for e in log)
     total_expected = sum(e.expected_bits for e in log)
-    if len(log) > 1:
-        lines.append(f"**Total: {total_actual:.2f} bits** *(expected {total_expected:.2f})*")
+    last_n         = log[-1].n_after
+    lines.append(
+        f"\n**Total: {total_actual:.2f} bits** _(expected {total_expected:.2f})_"
+        f"  ·  **{last_n:,}** word{'s' if last_n != 1 else ''} remaining"
+    )
     return "\n".join(lines)
 
 

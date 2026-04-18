@@ -29,6 +29,16 @@ def _pct(num: int, denom: int) -> str:
     return f"{round(100 * num / denom)}%"
 
 
+def _fmt_time(seconds: int) -> str:
+    if seconds <= 0:
+        return "—"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds}s"
+
+
 def _bar(count: int, max_count: int, width: int = 12) -> str:
     filled = round(width * count / max_count) if max_count else 0
     return "█" * filled + "░" * (width - filled)
@@ -155,11 +165,15 @@ def stats_embed(row: dict, username: str) -> discord.Embed:
 
     embed = discord.Embed(title=f"📊 Stats — {username}", colour=BLUE)
 
+    total_time = row.get("total_time_seconds", 0) or 0
+    avg_time   = _fmt_time(total_time // won) if won else "—"
+
     overview = (
         f"🎮 Games Played: **{played}**\n"
         f"✅ Won: **{won}** ({win_rate})\n"
         f"🏆 Total Points: **{pts}** (avg {avg_pts}/game)\n"
-        f"🔥 Current Streak: **{streak}**  |  Best: **{max_str}**"
+        f"🔥 Current Streak: **{streak}**  |  Best: **{max_str}**\n"
+        f"⏱ Avg Solve Time: **{avg_time}**"
     )
     embed.add_field(name="Overview", value=overview, inline=False)
 
@@ -198,18 +212,21 @@ def leaderboard_embed(rows: list[dict], guild_name: str) -> discord.Embed:
 
     lines: list[str] = []
     for i, r in enumerate(rows):
-        name   = r["username"] or "Unknown"
-        pts    = r["total_points"]
-        played = r["games_played"]
-        wr     = _pct(r["games_won"], played)
-        streak = r["current_streak"]
+        name       = r["username"] or "Unknown"
+        pts        = r["total_points"]
+        played     = r["games_played"]
+        won        = r["games_won"]
+        wr         = _pct(won, played)
+        streak     = r["current_streak"]
+        total_time = r.get("total_time_seconds") or 0
+        avg_time   = _fmt_time(total_time // won) if won else "—"
         streak_tag = f" 🔥{streak}" if streak >= 3 else ""
         lines.append(
-            f"{_medal(i)} **{name}** — {pts} pts  ({wr} win rate, {played} games){streak_tag}"
+            f"{_medal(i)} **{name}** — **{pts} pts**  ·  {wr} WR  ·  ⏱ {avg_time}{streak_tag}"
         )
 
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Points: Guess 1=10 · 2=7 · 3=5 · 4=3 · 5=2 · 6=1 + streak bonuses")
+    embed.set_footer(text="Points: Guess 1=10 · 2=7 · 3=5 · 4=3 · 5=2 · 6=1 + streak bonus  ·  tiebreak: fastest avg")
     return embed
 
 
@@ -342,12 +359,13 @@ def history_embed(rows: list[dict], username: str) -> discord.Embed:
 
     lines: list[str] = []
     for r in rows:
-        status = "✅" if r["won"] else "❌"
-        mode   = "📅" if r["mode"] == "daily" else "🎲"
-        target = r["target"] if r["won"] else "?????"
+        status  = "✅" if r["won"] else "❌"
+        mode    = "📅" if r["mode"] == "daily" else "🎲"
+        target  = r["target"] if r["won"] else "?????"
+        elapsed = _fmt_time(r.get("elapsed_seconds") or 0)
         lines.append(
             f"{status} {mode} **{target}** — {r['num_guesses']} guess{'es' if r['num_guesses'] != 1 else ''} "
-            f"| +{r['points']} pts | {r['game_date'] or r['played_at'][:10]}"
+            f"| +{r['points']} pts | ⏱ {elapsed} | {r['game_date'] or r['played_at'][:10]}"
         )
 
     embed.description = "\n".join(lines)

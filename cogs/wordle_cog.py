@@ -1,6 +1,5 @@
-from __future__ import annotations
 import json
-from datetime import date, timezone, datetime
+from datetime import date
 
 import discord
 from discord.ext import commands
@@ -23,7 +22,7 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def _require_guild(ctx: discord.ApplicationContext) -> bool:
+def _require_guild(ctx):
     return ctx.guild is not None
 
 

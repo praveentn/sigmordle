@@ -153,14 +153,16 @@ async def _do_giveup(user_id: str, guild_id: str, username: str) -> tuple[Wordle
 
 def _end_embed(game: WordleGame, username: str, points: int, elapsed: int) -> discord.Embed:
     embed = game_embed(game, username)
+    is_daily = game.mode == "daily"
     if game.is_won:
         embed.description = (
             f"🎉 **Solved in {game.num_guesses}/{game.max_guesses}!**  "
             f"**+{points} pts**  ·  ⏱ {_fmt_time(elapsed)}"
         )
     else:
+        word_reveal = "The word will be revealed tomorrow." if is_daily else f"The word was **`{game.target}`**"
         embed.description = (
-            f"💀 **Out of guesses!**  The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
+            f"💀 **Out of guesses!**  {word_reveal}  ·  ⏱ {_fmt_time(elapsed)}"
         )
     return embed
 
@@ -208,8 +210,9 @@ class WordleView(discord.ui.View):
             return
 
         embed = game_embed(game, interaction.user.display_name)
+        word_reveal = "The word will be revealed tomorrow." if game.mode == "daily" else f"The word was **`{game.target}`**"
         embed.description = (
-            f"🏳️ You gave up.  The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
+            f"🏳️ You gave up.  {word_reveal}  ·  ⏱ {_fmt_time(elapsed)}"
         )
         await interaction.response.edit_message(
             embed=embed, view=_done_view(), file=board_file(game),
@@ -560,7 +563,8 @@ class WordleCog(commands.Cog):
             return
 
         embed = game_embed(game, ctx.author.display_name)
-        embed.description = f"🏳️ You gave up. The word was **`{game.target}`**  ·  ⏱ {_fmt_time(elapsed)}"
+        word_reveal = "The word will be revealed tomorrow." if game.mode == "daily" else f"The word was **`{game.target}`**"
+        embed.description = f"🏳️ You gave up. {word_reveal}  ·  ⏱ {_fmt_time(elapsed)}"
 
         # Update thread if it exists
         thread_id    = active.get("thread_id")

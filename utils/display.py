@@ -296,7 +296,15 @@ def daily_results_embed(
             pass
 
     if len(all_elog) >= 2:
-        g1_bits = [e[0]["actual_bits"] for e in all_elog if e]
+        g1_bits = []
+        for e in all_elog:
+            try:
+                if e and isinstance(e[0], dict):
+                    bits = e[0].get("actual_bits")
+                    if bits is not None:
+                        g1_bits.append(float(bits))
+            except (IndexError, TypeError, ValueError):
+                pass
         if g1_bits:
             avg_g1 = sum(g1_bits) / len(g1_bits)
             best   = max(g1_bits)

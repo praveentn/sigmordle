@@ -123,20 +123,20 @@ async def create_game(
         return cur.lastrowid  # type: ignore[return-value]
 
 
-async def update_thread_info(game_id: int, thread_id: str, board_message_id: str) -> None:
+async def update_thread_info(game_id: int, guild_id: str, thread_id: str, board_message_id: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE wordle_games SET thread_id=?, board_message_id=? WHERE game_id=?",
-            (thread_id, board_message_id, game_id),
+            "UPDATE wordle_games SET thread_id=?, board_message_id=? WHERE game_id=? AND guild_id=?",
+            (thread_id, board_message_id, game_id, guild_id),
         )
         await db.commit()
 
 
-async def update_game(game_id: int, guesses: str, patterns: str, entropy_log: str, status: str) -> None:
+async def update_game(game_id: int, guild_id: str, guesses: str, patterns: str, entropy_log: str, status: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE wordle_games SET guesses=?, patterns=?, entropy_log=?, status=? WHERE game_id=?",
-            (guesses, patterns, entropy_log, status, game_id),
+            "UPDATE wordle_games SET guesses=?, patterns=?, entropy_log=?, status=? WHERE game_id=? AND guild_id=?",
+            (guesses, patterns, entropy_log, status, game_id, guild_id),
         )
         await db.commit()
 
@@ -344,14 +344,18 @@ async def get_server_word_stats(guild_id: str) -> list[dict]:
 async def get_top_starting_words(guild_id: str, limit: int = 10) -> list[tuple[str, int]]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT guesses FROM game_history WHERE guild_id=?", (guild_id,)
+            "SELECT guesses FROM game_history WHERE guild_id=? ORDER BY id DESC LIMIT 2000",
+            (guild_id,),
         ) as cur:
             rows = await cur.fetchall()
 
     from collections import Counter
     ctr: Counter = Counter()
     for (g_json,) in rows:
-        guesses = json.loads(g_json)
-        if guesses:
-            ctr[guesses[0]] += 1
+        try:
+            guesses = json.loads(g_json)
+            if guesses:
+                ctr[guesses[0]] += 1
+        except (json.JSONDecodeError, TypeError):
+            pass
     return ctr.most_common(limit)

@@ -88,7 +88,7 @@ async def _apply_guess(
 
     if game.is_active:
         await db.update_game(
-            game.game_id, game.guesses_json(), game.patterns_json(),
+            game.game_id, guild_id, game.guesses_json(), game.patterns_json(),
             game.entropy_log_json(), "active",
         )
     else:
@@ -97,7 +97,7 @@ async def _apply_guess(
         points     = game.compute_points(streak=cur_streak) if game.is_won else 0
 
         await db.update_game(
-            game.game_id, game.guesses_json(), game.patterns_json(),
+            game.game_id, guild_id, game.guesses_json(), game.patterns_json(),
             game.entropy_log_json(), game.status,
         )
         starting = game.guesses[0] if game.guesses else word
@@ -131,7 +131,7 @@ async def _do_giveup(user_id: str, guild_id: str, username: str) -> tuple[Wordle
     elapsed     = _elapsed(active.get("created_at", ""))
 
     await db.update_game(
-        game.game_id, game.guesses_json(), game.patterns_json(),
+        game.game_id, guild_id, game.guesses_json(), game.patterns_json(),
         game.entropy_log_json(), "lost",
     )
     await db.upsert_user_stats(
@@ -193,6 +193,9 @@ class WordleView(discord.ui.View):
 
     @discord.ui.button(label="Give Up", style=discord.ButtonStyle.danger, emoji="🏳️")
     async def giveup_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.guild is None or str(interaction.guild_id) != self.guild_id:
+            await interaction.response.send_message("❌ This button is not valid here.", ephemeral=True)
+            return
         if self._not_owner(interaction):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
@@ -296,7 +299,7 @@ class WordleCog(commands.Cog):
 
         if board_msg is None:
             new_msg = await thread.send(embed=embed, view=view, file=board_file(game))
-            await db.update_thread_info(active["game_id"], str(thread.id), str(new_msg.id))
+            await db.update_thread_info(active["game_id"], gid, str(thread.id), str(new_msg.id))
 
         if not game.is_active:
             await _archive_thread(
@@ -399,7 +402,7 @@ class WordleCog(commands.Cog):
                 "Ask a server admin to grant it, or try a different channel.",
                 ephemeral=True,
             )
-            await db.update_game(game_id, "[]", "[]", "[]", "cancelled")
+            await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
             return
         except discord.HTTPException:
             # Fall back to public thread via a starter message
@@ -417,7 +420,7 @@ class WordleCog(commands.Cog):
                     "Make sure the bot has **Create Threads** permission.",
                     ephemeral=True,
                 )
-                await db.update_game(game_id, "[]", "[]", "[]", "cancelled")
+                await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
                 return
 
         # Send board inside the thread
@@ -430,7 +433,7 @@ class WordleCog(commands.Cog):
             "Click **🏳️ Give Up** to forfeit."
         )
         board_msg = await thread.send(embed=embed, view=WordleView(uid, gid), file=board_file(game))
-        await db.update_thread_info(game_id, str(thread.id), str(board_msg.id))
+        await db.update_thread_info(game_id, gid, str(thread.id), str(board_msg.id))
 
         await ctx.followup.send(
             f"🎮 Your game is ready!  →  {thread.mention}", ephemeral=True
@@ -641,9 +644,14 @@ class WordleCog(commands.Cog):
         if already_played and len(rows) >= 2:
             all_g1bits = []
             for r in rows:
-                elog = json.loads(r.get("entropy_log") or "[]")
-                if elog:
-                    all_g1bits.append(elog[0]["actual_bits"])
+                try:
+                    elog = json.loads(r.get("entropy_log") or "[]")
+                    if elog and isinstance(elog[0], dict):
+                        bits = elog[0].get("actual_bits")
+                        if bits is not None:
+                            all_g1bits.append(float(bits))
+                except (json.JSONDecodeError, IndexError, TypeError, ValueError):
+                    pass
             if all_g1bits:
                 avg = sum(all_g1bits) / len(all_g1bits)
                 embed.add_field(

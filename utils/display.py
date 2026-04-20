@@ -142,7 +142,7 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
         title  = f"🎉 Solved in {game.num_guesses}/{game.max_guesses}!"
     elif game.is_lost:
         colour = RED
-        title  = f"😔 The word was **{game.target}**"
+        title  = f"😔 The word was **{game.target}**" if game.mode != "daily" else "😔 Better luck tomorrow!"
     else:
         left  = game.remaining_guesses
         colour = BLUE

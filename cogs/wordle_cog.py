@@ -643,7 +643,8 @@ class WordleCog(commands.Cog):
 
         already_played = await db.check_daily_played(uid, gid, today)
         rows  = await db.get_daily_results(gid, today)
-        embed = daily_results_embed(rows, word, ctx.guild.name, today, show_word=already_played)
+        # Never reveal the daily word on the same day — show it only from tomorrow onward
+        embed = daily_results_embed(rows, word, ctx.guild.name, today, show_word=False)
 
         if already_played and len(rows) >= 2:
             all_g1bits = []

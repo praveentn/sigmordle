@@ -77,6 +77,8 @@ _MIGRATIONS = [
     ("user_stats",   "total_time_seconds", "INTEGER DEFAULT 0"),
     ("game_history", "elapsed_seconds",    "INTEGER DEFAULT 0"),
     ("game_history", "entropy_log",        "TEXT DEFAULT '[]'"),
+    ("game_history", "mode",               "TEXT"),
+    ("game_history", "game_date",          "TEXT"),
     ("wordle_games", "thread_id",          "TEXT"),
     ("wordle_games", "board_message_id",   "TEXT"),
 ]
@@ -339,6 +341,33 @@ async def get_server_word_stats(guild_id: str) -> list[dict]:
             (guild_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_daily_played_with_stats(guild_id: str, game_date: str) -> list[dict]:
+    """Daily game rows joined with current_streak from user_stats — used for reminders."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT gh.user_id, gh.username, gh.num_guesses, gh.won, gh.points, gh.elapsed_seconds,
+                      COALESCE(us.current_streak, 0) AS current_streak
+               FROM game_history gh
+               LEFT JOIN user_stats us ON gh.user_id = us.user_id AND gh.guild_id = us.guild_id
+               WHERE gh.guild_id=? AND gh.game_date=? AND gh.mode='daily'
+               ORDER BY gh.won DESC, gh.num_guesses ASC, gh.elapsed_seconds ASC""",
+            (guild_id, game_date),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_recent_daily_channel(guild_id: str) -> str | None:
+    """Return the channel_id where the most recent daily game in this guild was started."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT channel_id FROM wordle_games WHERE guild_id=? AND mode='daily' ORDER BY game_id DESC LIMIT 1",
+            (guild_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def get_top_starting_words(guild_id: str, limit: int = 10) -> list[tuple[str, int]]:

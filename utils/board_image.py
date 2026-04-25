@@ -19,7 +19,7 @@ from pathlib import Path
 import discord
 from PIL import Image, ImageDraw, ImageFont
 
-from utils.words import CORRECT, PRESENT, ABSENT
+from utils.words import CORRECT, PRESENT, ABSENT, letter_states
 from game.wordle import WordleGame
 
 # ── Layout constants ──────────────────────────────────────────────────────────
@@ -29,6 +29,16 @@ GAP   = 5        # gap between tiles
 PAD   = 12       # board outer padding
 FSIZE = 34       # font size for the letter
 
+# ── Keyboard layout constants ─────────────────────────────────────────────────
+
+KB_TILE  = 30    # keyboard key size (px)
+KB_GAP   = 3     # gap between keys
+KB_VSEP  = 10    # vertical gap between board and keyboard section
+KB_FSIZE = 15    # font size for key letters
+
+_QWERTY_ROWS    = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
+_KB_UNTRIED     = (129, 131, 132)   # #818384 — not yet guessed
+
 # ── Wordle dark-theme palette ─────────────────────────────────────────────────
 
 _BG        = (18,  18,  19)    # #121213
@@ -37,7 +47,8 @@ _YELLOW    = (181, 159, 59)    # #B59F3B  — present, wrong position
 _DARKGREY  = (58,  58,  60)    # #3A3A3C  — absent / empty border
 _WHITE     = (255, 255, 255)
 
-_STATE_COLOR = {CORRECT: _GREEN, PRESENT: _YELLOW, ABSENT: _DARKGREY}
+_STATE_COLOR    = {CORRECT: _GREEN, PRESENT: _YELLOW, ABSENT: _DARKGREY}
+_KB_STATE_COLOR = {CORRECT: _GREEN, PRESENT: _YELLOW, ABSENT: _DARKGREY}
 
 # ── Font resolution ───────────────────────────────────────────────────────────
 
@@ -112,16 +123,63 @@ def _tile(letter: str | None, state: int | None) -> Image.Image:
     return _tile_cache[key]
 
 
+# ── Keyboard tile cache ───────────────────────────────────────────────────────
+
+_kb_tile_cache: dict[tuple, Image.Image] = {}
+
+
+def _make_kb_tile(letter: str, colour: tuple) -> Image.Image:
+    img  = Image.new("RGB", (KB_TILE, KB_TILE), _BG)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, KB_TILE - 1, KB_TILE - 1], fill=colour)
+    f    = _font(KB_FSIZE)
+    bbox = draw.textbbox((0, 0), letter, font=f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text(
+        ((KB_TILE - tw) // 2 - bbox[0], (KB_TILE - th) // 2 - bbox[1]),
+        letter, fill=_WHITE, font=f,
+    )
+    return img
+
+
+def _kb_tile(letter: str, colour: tuple) -> Image.Image:
+    key = (letter, colour)
+    if key not in _kb_tile_cache:
+        _kb_tile_cache[key] = _make_kb_tile(letter, colour)
+    return _kb_tile_cache[key]
+
+
+def _append_keyboard(board: Image.Image, game: WordleGame) -> Image.Image:
+    """Return a new image with a QWERTY keyboard strip appended below the board."""
+    states   = letter_states(game.guesses, game.patterns)
+    bw, bh   = board.size
+    kb_strip = PAD + (KB_TILE + KB_GAP) * len(_QWERTY_ROWS) - KB_GAP + PAD
+    canvas   = Image.new("RGB", (bw, bh + KB_VSEP + kb_strip), _BG)
+    canvas.paste(board, (0, 0))
+
+    y = bh + KB_VSEP + PAD
+    for row_str in _QWERTY_ROWS:
+        n     = len(row_str)
+        row_w = n * KB_TILE + (n - 1) * KB_GAP
+        x     = (bw - row_w) // 2
+        for ch in row_str:
+            colour = _KB_STATE_COLOR.get(states.get(ch), _KB_UNTRIED)
+            canvas.paste(_kb_tile(ch, colour), (x, y))
+            x += KB_TILE + KB_GAP
+        y += KB_TILE + KB_GAP
+
+    return canvas
+
+
 # ── Board composer ────────────────────────────────────────────────────────────
 
 def render_board_bytes(game: WordleGame) -> bytes:
-    """Compose the full board as PNG bytes."""
+    """Compose the board + keyboard strip as PNG bytes."""
     rows = game.max_guesses
     w = PAD * 2 + TILE * 5 + GAP * 4
     h = PAD * 2 + TILE * rows + GAP * (rows - 1)
 
     board = Image.new("RGB", (w, h), _BG)
-
     for r in range(rows):
         for c in range(5):
             x = PAD + c * (TILE + GAP)
@@ -132,8 +190,9 @@ def render_board_bytes(game: WordleGame) -> bytes:
                 img = _tile(None, None)
             board.paste(img, (x, y))
 
+    combined = _append_keyboard(board, game)
     buf = io.BytesIO()
-    board.save(buf, format="PNG", optimize=True)
+    combined.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf.getvalue()
 

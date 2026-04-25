@@ -14,12 +14,16 @@ UX design
 """
 
 import json
+import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, time as _dtime, timezone
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import SlashCommandGroup
+
+log = logging.getLogger(__name__)
+_DAILY_REMINDER_TIME = _dtime(hour=9, minute=0, tzinfo=timezone.utc)
 
 from utils import database as db
 from utils.words import (
@@ -30,7 +34,7 @@ from utils.words import (
 )
 from utils.display import (
     game_embed, stats_embed, leaderboard_embed,
-    daily_results_embed, server_stats_embed, history_embed, help_embed,
+    daily_results_embed, server_stats_embed, history_embed, help_embed, reminder_embed,
 )
 from utils.board_image import board_file
 from game.wordle import WordleGame, EntropyEntry
@@ -232,6 +236,53 @@ class WordleView(discord.ui.View):
 
 class WordleCog(commands.Cog):
     wordle = SlashCommandGroup("wordle", "Sigmordle — daily word guessing game")
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.daily_reminder_task.start()
+
+    def cog_unload(self):
+        self.daily_reminder_task.cancel()
+
+    # ── Daily reminder background task ────────────────────────────────────────
+
+    @tasks.loop(time=_DAILY_REMINDER_TIME)
+    async def daily_reminder_task(self):
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        for guild in self.bot.guilds:
+            gid = str(guild.id)
+            players = await db.get_daily_played_with_stats(gid, yesterday)
+            if not players:
+                continue
+            channel_id = await db.get_recent_daily_channel(gid)
+            if not channel_id:
+                continue
+            channel = guild.get_channel(int(channel_id))
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            leaderboard = await db.get_leaderboard(gid, limit=10)
+            embeds      = reminder_embed(players, leaderboard, yesterday, guild.name)
+            mentions    = " ".join(f"<@{p['user_id']}>" for p in players[:30])
+            content     = (
+                f"🎮 **Daily Wordle Reminder!** {mentions}\n"
+                "Play today's word → `/wordle play mode:daily`"
+            )
+            if len(content) > 2000:
+                content = content[:1997] + "..."
+            try:
+                first = True
+                for embed in embeds:
+                    if first:
+                        await channel.send(content=content, embed=embed)
+                        first = False
+                    else:
+                        await channel.send(embed=embed)
+            except Exception as exc:
+                log.error("daily_reminder failed for guild %s: %s", gid, exc)
+
+    @daily_reminder_task.before_loop
+    async def before_daily_reminder(self):
+        await self.bot.wait_until_ready()
 
     # ── Message-based guess input ─────────────────────────────────────────────
 
@@ -671,6 +722,37 @@ class WordleCog(commands.Cog):
 
         await ctx.followup.send(embed=embed)
 
+    # ── /wordle remind ────────────────────────────────────────────────────────
+
+    @wordle.command(name="remind", description="Send the daily streak reminder for yesterday to this channel")
+    async def remind(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.")
+            return
+
+        gid       = str(ctx.guild.id)
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        players   = await db.get_daily_played_with_stats(gid, yesterday)
+        leaderboard = await db.get_leaderboard(gid, limit=10)
+        embeds    = reminder_embed(players, leaderboard, yesterday, ctx.guild.name)
+
+        mentions = " ".join(f"<@{p['user_id']}>" for p in players[:30])
+        content  = (
+            f"🎮 **Daily Wordle Reminder!** {mentions}\n"
+            "Play today's word → `/wordle play mode:daily`"
+        ) if players else "🎮 **Daily Wordle Reminder!** Nobody played yesterday — be the first today!"
+        if len(content) > 2000:
+            content = content[:1997] + "..."
+
+        first = True
+        for embed in embeds:
+            if first:
+                await ctx.followup.send(content=content, embed=embed)
+                first = False
+            else:
+                await ctx.followup.send(embed=embed)
+
     # ── /wordle server ────────────────────────────────────────────────────────
 
     @wordle.command(name="server", description="Show server-wide Sigmordle statistics")
@@ -713,4 +795,4 @@ class WordleCog(commands.Cog):
 
 
 def setup(bot: commands.Bot) -> None:
-    bot.add_cog(WordleCog())
+    bot.add_cog(WordleCog(bot))

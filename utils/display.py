@@ -5,7 +5,7 @@ from collections import Counter
 import discord
 
 from utils.words import (
-    pattern_to_emoji, build_keyboard_lines,
+    pattern_to_emoji,
     CORRECT, PRESENT, ABSENT,
 )
 from game.wordle import WordleGame, EntropyEntry
@@ -69,35 +69,6 @@ def render_board(game: WordleGame) -> str:
     return "\n".join(lines)
 
 
-# ── Letter-state renderer ─────────────────────────────────────────────────────
-
-def render_keyboard(game: WordleGame) -> str:
-    """
-    Row 1: 5-slot position view — known letters in their exact position, ⬜ for unknowns.
-    Row 2: 🟨-prefixed letters found but wrong position, in word-discovery order.
-    Row 3: ⬛-prefixed letters confirmed absent, alphabetical.
-    Row 4: untried letters in italic, alphabetical.
-    """
-    correct_slots, present_ordered, absent_sorted, untried_sorted = build_keyboard_lines(
-        game.guesses, game.patterns
-    )
-
-    lines: list[str] = []
-
-    # Position row — always shown
-    pos = " ".join(f"🟩{ch}" if ch else "⬜" for ch in correct_slots)
-    lines.append(pos)
-
-    if present_ordered:
-        lines.append(" ".join(f"🟨{ch}" for ch in present_ordered))
-
-    if absent_sorted:
-        lines.append(" ".join(f"⬛{ch}" for ch in absent_sorted))
-
-    if untried_sorted:
-        lines.append(f"_{' '.join(untried_sorted)}_")
-
-    return "\n".join(lines)
 
 
 # ── Entropy renderer ──────────────────────────────────────────────────────────
@@ -154,8 +125,6 @@ def game_embed(game: WordleGame, username: str) -> discord.Embed:
 
     # Board is rendered as an attached PNG — reference it via attachment URL.
     embed.set_image(url="attachment://board.png")
-    embed.add_field(name="Letters", value=render_keyboard(game), inline=False)
-
     if game.entropy_log:
         embed.add_field(
             name="📐 Entropy",
@@ -394,6 +363,79 @@ def history_embed(rows: list[dict], username: str) -> discord.Embed:
     embed.description = "\n".join(lines)
     embed.set_footer(text="📅 = Daily  🎲 = Free Play")
     return embed
+
+
+# ── Daily reminder embed ──────────────────────────────────────────────────────
+
+def reminder_embed(
+    players: list[dict],
+    leaderboard: list[dict],
+    game_date: str,
+    guild_name: str,
+) -> list[discord.Embed]:
+    """Build daily-reminder embed(s). Returns a list; multiple pages if > 25 players."""
+    PAGE = 25
+    solved = [p for p in players if p["won"]]
+    failed = [p for p in players if not p["won"]]
+
+    all_lines: list[str] = []
+    for i, p in enumerate(solved):
+        g      = p["num_guesses"]
+        t      = _fmt_time(p.get("elapsed_seconds") or 0)
+        streak = p.get("current_streak", 0)
+        stag   = f"  🔥{streak}" if streak >= 2 else ""
+        all_lines.append(
+            f"{_medal(i)} <@{p['user_id']}> — {g} guess{'es' if g != 1 else ''}  ⏱ {t}{stag}"
+        )
+    for p in failed:
+        all_lines.append(f"❌ <@{p['user_id']}> — didn't solve  💔 streak reset")
+
+    if not all_lines:
+        all_lines = ["*Nobody played yesterday.*"]
+
+    lb_lines: list[str] = []
+    for i, r in enumerate(leaderboard[:10]):
+        stag = f"  🔥{r['current_streak']}" if r.get("current_streak", 0) >= 3 else ""
+        lb_lines.append(f"{_medal(i)} **{r['username']}** — **{r['total_points']}** pts{stag}")
+
+    pages     = [all_lines[i:i + PAGE] for i in range(0, len(all_lines), PAGE)]
+    n_pages   = len(pages)
+    embeds: list[discord.Embed] = []
+
+    for idx, page in enumerate(pages):
+        embed = discord.Embed(
+            title=(
+                f"📅 Daily Wordle Reminder — {game_date}"
+                if idx == 0 else f"📅 Players — page {idx + 1}/{n_pages}"
+            ),
+            colour=BLUE,
+        )
+        if idx == 0:
+            embed.description = (
+                f"**{len(players)} player{'s' if len(players) != 1 else ''}** played yesterday.\n"
+                "Play today's word → `/wordle play mode:daily`"
+            )
+
+        field_title = (
+            f"✅ {len(solved)} solved  ·  ❌ {len(failed)} didn't"
+            if idx == 0 else "Players (cont.)"
+        )
+        embed.add_field(name=field_title, value="\n".join(page)[:1024], inline=False)
+
+        if idx == n_pages - 1 and lb_lines:
+            embed.add_field(
+                name="🏆 Overall Leaderboard",
+                value="\n".join(lb_lines),
+                inline=False,
+            )
+
+        page_tag = f" · Page {idx + 1}/{n_pages}" if n_pages > 1 else ""
+        embed.set_footer(
+            text=f"{guild_name} · {game_date} · /wordle play mode:daily{page_tag}"
+        )
+        embeds.append(embed)
+
+    return embeds
 
 
 # ── Help embed ────────────────────────────────────────────────────────────────

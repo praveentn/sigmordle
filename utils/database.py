@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS game_history (
     played_at       TEXT    DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS guild_config (
+    guild_id           TEXT PRIMARY KEY,
+    timezone           TEXT NOT NULL DEFAULT 'UTC',
+    last_reminder_date TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_gh_guild_date ON game_history(guild_id, game_date);
 CREATE INDEX IF NOT EXISTS idx_gh_user_guild ON game_history(user_id, guild_id);
 CREATE INDEX IF NOT EXISTS idx_wg_user_guild ON wordle_games(user_id, guild_id, status);
@@ -388,3 +394,56 @@ async def get_top_starting_words(guild_id: str, limit: int = 10) -> list[tuple[s
         except (json.JSONDecodeError, TypeError):
             pass
     return ctr.most_common(limit)
+
+
+# ── Guild config ──────────────────────────────────────────────────────────────
+
+async def get_guild_config(guild_id: str) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_config WHERE guild_id=?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                return dict(row)
+            return {"guild_id": guild_id, "timezone": "UTC", "last_reminder_date": None}
+
+
+async def set_guild_timezone(guild_id: str, tz_name: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO guild_config (guild_id, timezone) VALUES (?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET timezone=excluded.timezone",
+            (guild_id, tz_name),
+        )
+        await db.commit()
+
+
+async def mark_reminder_sent(guild_id: str, date_str: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO guild_config (guild_id, last_reminder_date) VALUES (?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET last_reminder_date=excluded.last_reminder_date",
+            (guild_id, date_str),
+        )
+        await db.commit()
+
+
+async def get_daily_players_for_reminder(guild_id: str) -> list[dict]:
+    """All users who have ever played daily mode, ordered by current streak desc."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT us.user_id, us.username, us.current_streak, us.total_points,
+                      us.games_played, us.games_won
+               FROM user_stats us
+               WHERE us.guild_id=?
+               AND EXISTS (
+                   SELECT 1 FROM game_history gh
+                   WHERE gh.user_id=us.user_id AND gh.guild_id=us.guild_id AND gh.mode='daily'
+               )
+               ORDER BY us.current_streak DESC, us.total_points DESC""",
+            (guild_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]

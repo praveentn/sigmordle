@@ -367,72 +367,119 @@ def history_embed(rows: list[dict], username: str) -> discord.Embed:
 
 # ── Daily reminder embed ──────────────────────────────────────────────────────
 
+_FIELD_CAP  = 950   # safe below Discord's 1024 field-value limit
+_DESC_CAP   = 3900  # safe below Discord's 4096 description limit
+_EMBED_CAP  = 5800  # safe below Discord's 6000 total-embed limit
+
+
+def _split_lines(lines: list[str], cap: int = _FIELD_CAP) -> list[str]:
+    """Join lines into field-value chunks, each strictly within `cap` chars.
+    Never splits a line in the middle."""
+    if not lines:
+        return [""]
+    chunks: list[str] = []
+    buf: list[str] = []
+    used = 0
+    for line in lines:
+        needed = len(line) + (1 if buf else 0)  # +1 for the newline separator
+        if buf and used + needed > cap:
+            chunks.append("\n".join(buf))
+            buf   = [line]
+            used  = len(line)
+        else:
+            buf.append(line)
+            used += needed
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
+
+
 def reminder_embed(
-    players: list[dict],
+    all_players: list[dict],
     leaderboard: list[dict],
-    game_date: str,
+    today: str,
     guild_name: str,
+    word_fact: str = "",
 ) -> list[discord.Embed]:
-    """Build daily-reminder embed(s). Returns a list; multiple pages if > 25 players."""
-    PAGE = 25
-    solved = [p for p in players if p["won"]]
-    failed = [p for p in players if not p["won"]]
+    """Build daily-reminder embed(s). Guaranteed to respect all Discord char limits."""
+    # Sort: active streaks first (most at stake), then everyone else
+    hot    = [p for p in all_players if p.get("current_streak", 0) >= 3]
+    others = [p for p in all_players if p.get("current_streak", 0) < 3]
+    ordered = hot + others
 
-    all_lines: list[str] = []
-    for i, p in enumerate(solved):
-        g      = p["num_guesses"]
-        t      = _fmt_time(p.get("elapsed_seconds") or 0)
+    player_lines: list[str] = []
+    for p in ordered:
         streak = p.get("current_streak", 0)
-        stag   = f"  🔥{streak}" if streak >= 2 else ""
-        all_lines.append(
-            f"{_medal(i)} <@{p['user_id']}> — {g} guess{'es' if g != 1 else ''}  ⏱ {t}{stag}"
-        )
-    for p in failed:
-        all_lines.append(f"❌ <@{p['user_id']}> — didn't solve  💔 streak reset")
+        pts    = p.get("total_points", 0)
+        if streak >= 7:
+            fire = f"🔥×{streak}"
+        elif streak >= 3:
+            fire = f"🔥{streak}"
+        elif streak >= 1:
+            fire = "✨"
+        else:
+            fire = ""
+        stag = f"  {fire}" if fire else ""
+        player_lines.append(f"<@{p['user_id']}>{stag}  ·  **{pts} pts**")
 
-    if not all_lines:
-        all_lines = ["*Nobody played yesterday.*"]
+    if not player_lines:
+        player_lines = ["*No daily players yet — be the first!*"]
+
+    # Split player lines into field-sized chunks (by char count, not item count)
+    player_chunks = _split_lines(player_lines)
 
     lb_lines: list[str] = []
     for i, r in enumerate(leaderboard[:10]):
-        stag = f"  🔥{r['current_streak']}" if r.get("current_streak", 0) >= 3 else ""
+        streak = r.get("current_streak", 0)
+        stag   = f"  🔥{streak}" if streak >= 3 else ""
         lb_lines.append(f"{_medal(i)} **{r['username']}** — **{r['total_points']}** pts{stag}")
+    # Leaderboard field — split if needed (rare, but guards against very long usernames)
+    lb_chunks = _split_lines(lb_lines)
 
-    pages     = [all_lines[i:i + PAGE] for i in range(0, len(all_lines), PAGE)]
-    n_pages   = len(pages)
+    n_chunks = len(player_chunks)
+    n_hot    = len(hot)
     embeds: list[discord.Embed] = []
 
-    for idx, page in enumerate(pages):
+    for idx, chunk in enumerate(player_chunks):
+        is_first = idx == 0
+        is_last  = idx == n_chunks - 1
+
+        if is_first:
+            fact_line = f"📖 *{word_fact[:_DESC_CAP - 200]}*\n" if word_fact else ""
+            cta = (
+                f"⚡ **{len(all_players)} player{'s' if len(all_players) != 1 else ''}** "
+                f"— {n_hot} streak{'s' if n_hot != 1 else ''} on the line.\n"
+                "👉 `/wordle play mode:daily` — your word is waiting."
+            )
+            description: str | None = fact_line + cta
+        else:
+            description = None
+
         embed = discord.Embed(
             title=(
-                f"📅 Daily Wordle Reminder — {game_date}"
-                if idx == 0 else f"📅 Players — page {idx + 1}/{n_pages}"
+                f"🌅 Sigmordle — Day {today} starts now!"
+                if is_first else f"🌅 Players — {idx + 1}/{n_chunks}"
             ),
             colour=BLUE,
+            description=description,
         )
-        if idx == 0:
-            embed.description = (
-                f"**{len(players)} player{'s' if len(players) != 1 else ''}** played yesterday.\n"
-                "Play today's word → `/wordle play mode:daily`"
-            )
 
-        field_title = (
-            f"✅ {len(solved)} solved  ·  ❌ {len(failed)} didn't"
-            if idx == 0 else "Players (cont.)"
+        field_name = (
+            f"🔥 {n_hot} streak{'s' if n_hot != 1 else ''} at risk  ·  {len(all_players)} total"
+            if is_first else "Players (cont.)"
         )
-        embed.add_field(name=field_title, value="\n".join(page)[:1024], inline=False)
+        embed.add_field(name=field_name, value=chunk, inline=False)
 
-        if idx == n_pages - 1 and lb_lines:
-            embed.add_field(
-                name="🏆 Overall Leaderboard",
-                value="\n".join(lb_lines),
-                inline=False,
-            )
+        if is_last and lb_lines:
+            for lbi, lb_chunk in enumerate(lb_chunks):
+                embed.add_field(
+                    name="🏆 Leaderboard" if lbi == 0 else "🏆 Leaderboard (cont.)",
+                    value=lb_chunk,
+                    inline=False,
+                )
 
-        page_tag = f" · Page {idx + 1}/{n_pages}" if n_pages > 1 else ""
-        embed.set_footer(
-            text=f"{guild_name} · {game_date} · /wordle play mode:daily{page_tag}"
-        )
+        page_tag = f" · {idx + 1}/{n_chunks}" if n_chunks > 1 else ""
+        embed.set_footer(text=f"{guild_name} · {today}{page_tag}"[:2048])
         embeds.append(embed)
 
     return embeds
@@ -470,6 +517,8 @@ def help_embed() -> discord.Embed:
             "`/wordle daily` — today's server results\n"
             "`/wordle server` — server-wide stats\n"
             "`/wordle history` — your recent games\n"
+            "`/wordle timezone <tz>` — set server timezone for reminders *(admin)*\n"
+            "`/wordle remind` — trigger today's reminder manually *(admin)*\n"
             "`/wordle help` — this message"
         ),
         inline=False,

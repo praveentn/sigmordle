@@ -16,14 +16,14 @@ UX design
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta, time as _dtime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from discord.ext import commands, tasks
 from discord import SlashCommandGroup
 
 log = logging.getLogger(__name__)
-_DAILY_REMINDER_TIME = _dtime(hour=9, minute=0, tzinfo=timezone.utc)
 
 from utils import database as db
 from utils.words import (
@@ -36,6 +36,7 @@ from utils.display import (
     game_embed, stats_embed, leaderboard_embed,
     daily_results_embed, server_stats_embed, history_embed, help_embed, reminder_embed,
 )
+from utils.wordhistory import get_word_fact
 from utils.board_image import board_file
 from game.wordle import WordleGame, EntropyEntry
 
@@ -44,6 +45,18 @@ from game.wordle import WordleGame, EntropyEntry
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def _build_mention_content(players: list[dict], prefix: str, cap: int = 2000) -> str:
+    """Build a message string with @mentions that never exceeds `cap` chars.
+    Stops adding mentions before the limit rather than cutting one in half."""
+    result = prefix
+    for p in players:
+        token = f"<@{p['user_id']}> "
+        if len(result) + len(token) > cap:
+            break
+        result += token
+    return result.rstrip()
 
 
 def _elapsed(created_at: str) -> int:
@@ -246,30 +259,49 @@ class WordleCog(commands.Cog):
 
     # ── Daily reminder background task ────────────────────────────────────────
 
-    @tasks.loop(time=_DAILY_REMINDER_TIME)
+    @tasks.loop(minutes=1)
     async def daily_reminder_task(self):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        now_utc = datetime.now(timezone.utc)
+
         for guild in self.bot.guilds:
             gid = str(guild.id)
-            players = await db.get_daily_played_with_stats(gid, yesterday)
-            if not players:
-                continue
-            channel_id = await db.get_recent_daily_channel(gid)
-            if not channel_id:
-                continue
-            channel = guild.get_channel(int(channel_id))
-            if not isinstance(channel, discord.TextChannel):
-                continue
-            leaderboard = await db.get_leaderboard(gid, limit=10)
-            embeds      = reminder_embed(players, leaderboard, yesterday, guild.name)
-            mentions    = " ".join(f"<@{p['user_id']}>" for p in players[:30])
-            content     = (
-                f"🎮 **Daily Wordle Reminder!** {mentions}\n"
-                "Play today's word → `/wordle play mode:daily`"
-            )
-            if len(content) > 2000:
-                content = content[:1997] + "..."
             try:
+                config = await db.get_guild_config(gid)
+                try:
+                    tz = ZoneInfo(config.get("timezone", "UTC"))
+                except (ZoneInfoNotFoundError, KeyError):
+                    tz = ZoneInfo("UTC")
+
+                local_now = now_utc.astimezone(tz)
+                # Only fire in the first 5 minutes of midnight local time
+                if not (local_now.hour == 0 and local_now.minute < 5):
+                    continue
+
+                today_local = local_now.date().isoformat()
+                if config.get("last_reminder_date") == today_local:
+                    continue
+
+                # Mark sent before doing any async work to prevent duplicate sends
+                await db.mark_reminder_sent(gid, today_local)
+
+                players = await db.get_daily_players_for_reminder(gid)
+                if not players:
+                    continue
+
+                channel_id = await db.get_recent_daily_channel(gid)
+                if not channel_id:
+                    continue
+                channel = guild.get_channel(int(channel_id))
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+
+                leaderboard = await db.get_leaderboard(gid, limit=10)
+                month, day  = local_now.month, local_now.day
+                word_fact   = get_word_fact(month, day)
+                embeds      = reminder_embed(players, leaderboard, today_local, guild.name, word_fact)
+
+                content = _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
+
                 first = True
                 for embed in embeds:
                     if first:
@@ -724,26 +756,25 @@ class WordleCog(commands.Cog):
 
     # ── /wordle remind ────────────────────────────────────────────────────────
 
-    @wordle.command(name="remind", description="Send the daily streak reminder for yesterday to this channel")
+    @wordle.command(name="remind", description="Send the daily reminder to this channel right now (admin)")
+    @discord.default_permissions(manage_guild=True)
     async def remind(self, ctx: discord.ApplicationContext):
         await ctx.defer()
         if ctx.guild is None:
             await ctx.followup.send("Use this inside a server.")
             return
 
-        gid       = str(ctx.guild.id)
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        players   = await db.get_daily_played_with_stats(gid, yesterday)
+        gid         = str(ctx.guild.id)
+        today       = date.today()
+        players     = await db.get_daily_players_for_reminder(gid)
         leaderboard = await db.get_leaderboard(gid, limit=10)
-        embeds    = reminder_embed(players, leaderboard, yesterday, ctx.guild.name)
+        word_fact   = get_word_fact(today.month, today.day)
+        embeds      = reminder_embed(players, leaderboard, today.isoformat(), ctx.guild.name, word_fact)
 
-        mentions = " ".join(f"<@{p['user_id']}>" for p in players[:30])
-        content  = (
-            f"🎮 **Daily Wordle Reminder!** {mentions}\n"
-            "Play today's word → `/wordle play mode:daily`"
-        ) if players else "🎮 **Daily Wordle Reminder!** Nobody played yesterday — be the first today!"
-        if len(content) > 2000:
-            content = content[:1997] + "..."
+        content = (
+            _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
+            if players else "🌅 **Sigmordle is LIVE!** No daily players yet — be the first!"
+        )
 
         first = True
         for embed in embeds:
@@ -752,6 +783,41 @@ class WordleCog(commands.Cog):
                 first = False
             else:
                 await ctx.followup.send(embed=embed)
+
+    # ── /wordle timezone ──────────────────────────────────────────────────────
+
+    @wordle.command(name="timezone", description="Set server timezone for daily reminders (admin only)")
+    @discord.default_permissions(manage_guild=True)
+    async def timezone_cmd(
+        self,
+        ctx: discord.ApplicationContext,
+        tz: discord.Option(  # type: ignore[valid-type]
+            str,
+            "IANA timezone name — e.g. America/New_York, Europe/London, Asia/Kolkata",
+            required=True,
+        ),
+    ):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, KeyError):
+            await ctx.followup.send(
+                f"❌ `{tz}` is not a valid IANA timezone name.\n"
+                "Examples: `UTC`  `America/New_York`  `Europe/London`  `Asia/Kolkata`  `Australia/Sydney`",
+                ephemeral=True,
+            )
+            return
+
+        await db.set_guild_timezone(str(ctx.guild.id), tz)
+        await ctx.followup.send(
+            f"✅ Timezone set to **{tz}**.\n"
+            f"Daily reminders will fire at **00:00 {tz}** each day.",
+            ephemeral=True,
+        )
 
     # ── /wordle server ────────────────────────────────────────────────────────
 

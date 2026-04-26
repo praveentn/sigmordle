@@ -485,6 +485,53 @@ def reminder_embed(
     return embeds
 
 
+# ── Reminder status embed ────────────────────────────────────────────────────
+
+def remind_status_embed(
+    config: dict,
+    guild_name: str,
+    channel_mention: str | None,
+    local_time_str: str | None,
+    player_count: int,
+) -> discord.Embed:
+    """Show the current reminder configuration for admins."""
+    enabled   = bool(config.get("reminder_enabled"))
+    has_chan  = bool(config.get("reminder_channel_id"))
+    tz_name   = config.get("timezone") or "UTC"
+    last_sent = config.get("last_reminder_date") or "never"
+
+    if not has_chan:
+        embed = discord.Embed(
+            title="🔕 Reminders — not configured",
+            colour=GREY,
+            description=(
+                "No reminder channel has been set.\n\n"
+                "**Quick setup:**\n"
+                "1️⃣  `/remind channel #channel` — where to post\n"
+                "2️⃣  `/remind timezone America/New_York` — when to post (default: UTC)\n\n"
+                "That's it — the bot fires every day at midnight local time."
+            ),
+        )
+        return embed
+
+    status_line = "✅ **Enabled**" if enabled else "🔕 **Disabled** — run `/remind channel #channel` to re-enable"
+    embed = discord.Embed(
+        title=f"📋 Reminder Config — {guild_name}",
+        colour=GREEN if enabled else GREY,
+    )
+    lines = [
+        f"**Status:** {status_line}",
+        f"**Channel:** {channel_mention or '`#deleted-channel`'}",
+        f"**Timezone:** `{tz_name}`",
+        f"**Current local time:** {local_time_str or '—'}",
+        f"**Last sent:** {last_sent}",
+        f"**Total daily players:** {player_count}",
+    ]
+    embed.description = "\n".join(lines)
+    embed.set_footer(text="Reminders fire at 12:00 AM local time · /remind off to disable")
+    return embed
+
+
 # ── Help embed ────────────────────────────────────────────────────────────────
 
 def help_embed() -> discord.Embed:
@@ -506,7 +553,7 @@ def help_embed() -> discord.Embed:
         ),
     )
     embed.add_field(
-        name="Commands",
+        name="Game commands",
         value=(
             "`/wordle play [max_guesses] [mode]` — start a game\n"
             "`/wordle guess <word>` — submit a guess (slash fallback)\n"
@@ -517,9 +564,18 @@ def help_embed() -> discord.Embed:
             "`/wordle daily` — today's server results\n"
             "`/wordle server` — server-wide stats\n"
             "`/wordle history` — your recent games\n"
-            "`/wordle timezone <tz>` — set server timezone for reminders *(admin)*\n"
-            "`/wordle remind` — trigger today's reminder manually *(admin)*\n"
             "`/wordle help` — this message"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Reminder setup *(admin only)*",
+        value=(
+            "`/remind channel #channel` — set where reminders are posted\n"
+            "`/remind timezone America/New_York` — set local midnight trigger time\n"
+            "`/remind status` — check current config\n"
+            "`/remind test` — fire a reminder right now\n"
+            "`/remind off` — disable automatic reminders"
         ),
         inline=False,
     )

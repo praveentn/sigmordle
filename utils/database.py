@@ -86,7 +86,10 @@ _SCHEMA_STMTS = [
 ]
 
 # Future column additions go here — (table, column, col_def)
-_MIGRATIONS: list[tuple[str, str, str]] = []
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("guild_config", "reminder_channel_id", "TEXT"),
+    ("guild_config", "reminder_enabled",    "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 # ── Pool + init ───────────────────────────────────────────────────────────────
@@ -444,7 +447,11 @@ async def get_guild_config(guild_id: str) -> dict:
         )
         if row:
             return dict(row)
-        return {"guild_id": guild_id, "timezone": "UTC", "last_reminder_date": None}
+        return {
+            "guild_id": guild_id, "timezone": "UTC",
+            "last_reminder_date": None,
+            "reminder_channel_id": None, "reminder_enabled": 0,
+        }
 
 
 async def set_guild_timezone(guild_id: str, tz_name: str) -> None:
@@ -454,6 +461,28 @@ async def set_guild_timezone(guild_id: str, tz_name: str) -> None:
             "INSERT INTO guild_config (guild_id, timezone) VALUES ($1,$2) "
             "ON CONFLICT (guild_id) DO UPDATE SET timezone=EXCLUDED.timezone",
             guild_id, tz_name,
+        )
+
+
+async def set_reminder_channel(guild_id: str, channel_id: str) -> None:
+    """Set the target channel and enable reminders (first-time setup or re-configure)."""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO guild_config (guild_id, reminder_channel_id, reminder_enabled) VALUES ($1,$2,1) "
+            "ON CONFLICT (guild_id) DO UPDATE SET "
+            "reminder_channel_id=EXCLUDED.reminder_channel_id, reminder_enabled=1",
+            guild_id, channel_id,
+        )
+
+
+async def set_reminder_enabled(guild_id: str, enabled: bool) -> None:
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO guild_config (guild_id, reminder_enabled) VALUES ($1,$2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET reminder_enabled=EXCLUDED.reminder_enabled",
+            guild_id, 1 if enabled else 0,
         )
 
 

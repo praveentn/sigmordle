@@ -34,7 +34,8 @@ from utils.words import (
 )
 from utils.display import (
     game_embed, stats_embed, leaderboard_embed,
-    daily_results_embed, server_stats_embed, history_embed, help_embed, reminder_embed,
+    daily_results_embed, server_stats_embed, history_embed, help_embed,
+    reminder_embed, remind_status_embed,
 )
 from utils.wordhistory import get_word_fact
 from utils.board_image import board_file
@@ -249,6 +250,7 @@ class WordleView(discord.ui.View):
 
 class WordleCog(commands.Cog):
     wordle = SlashCommandGroup("wordle", "Sigmordle — daily word guessing game")
+    remind = SlashCommandGroup("remind", "Configure Sigmordle daily reminders")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -256,6 +258,33 @@ class WordleCog(commands.Cog):
 
     def cog_unload(self):
         self.daily_reminder_task.cancel()
+
+    # ── Shared reminder sender ────────────────────────────────────────────────
+
+    async def _send_reminder(
+        self,
+        channel: discord.TextChannel,
+        guild: discord.Guild,
+        today_str: str,
+        month: int,
+        day: int,
+    ) -> None:
+        """Build and send the reminder embeds to `channel`. Raises on Discord errors."""
+        players     = await db.get_daily_players_for_reminder(str(guild.id))
+        leaderboard = await db.get_leaderboard(str(guild.id), limit=10)
+        word_fact   = get_word_fact(month, day)
+        embeds      = reminder_embed(players, leaderboard, today_str, guild.name, word_fact)
+        content     = (
+            _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
+            if players else "🌅 **Sigmordle is LIVE!**"
+        )
+        first = True
+        for embed in embeds:
+            if first:
+                await channel.send(content=content, embed=embed)
+                first = False
+            else:
+                await channel.send(embed=embed)
 
     # ── Daily reminder background task ────────────────────────────────────────
 
@@ -267,13 +296,17 @@ class WordleCog(commands.Cog):
             gid = str(guild.id)
             try:
                 config = await db.get_guild_config(gid)
+
+                # Skip entirely if not configured or disabled
+                if not config.get("reminder_enabled") or not config.get("reminder_channel_id"):
+                    continue
+
                 try:
                     tz = ZoneInfo(config.get("timezone", "UTC"))
                 except (ZoneInfoNotFoundError, KeyError):
                     tz = ZoneInfo("UTC")
 
                 local_now = now_utc.astimezone(tz)
-                # Only fire in the first 5 minutes of midnight local time
                 if not (local_now.hour == 0 and local_now.minute < 5):
                     continue
 
@@ -281,40 +314,167 @@ class WordleCog(commands.Cog):
                 if config.get("last_reminder_date") == today_local:
                     continue
 
-                # Mark sent before doing any async work to prevent duplicate sends
+                # Mark sent before any async I/O to prevent duplicate sends
                 await db.mark_reminder_sent(gid, today_local)
 
-                players = await db.get_daily_players_for_reminder(gid)
-                if not players:
-                    continue
-
-                channel_id = await db.get_recent_daily_channel(gid)
-                if not channel_id:
-                    continue
-                channel = guild.get_channel(int(channel_id))
+                channel = guild.get_channel(int(config["reminder_channel_id"]))
                 if not isinstance(channel, discord.TextChannel):
+                    log.warning("Reminder channel %s not found for guild %s", config["reminder_channel_id"], gid)
                     continue
 
-                leaderboard = await db.get_leaderboard(gid, limit=10)
-                month, day  = local_now.month, local_now.day
-                word_fact   = get_word_fact(month, day)
-                embeds      = reminder_embed(players, leaderboard, today_local, guild.name, word_fact)
-
-                content = _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
-
-                first = True
-                for embed in embeds:
-                    if first:
-                        await channel.send(content=content, embed=embed)
-                        first = False
-                    else:
-                        await channel.send(embed=embed)
+                await self._send_reminder(channel, guild, today_local, local_now.month, local_now.day)
             except Exception as exc:
                 log.error("daily_reminder failed for guild %s: %s", gid, exc)
 
     @daily_reminder_task.before_loop
     async def before_daily_reminder(self):
         await self.bot.wait_until_ready()
+
+    # ── /remind channel ───────────────────────────────────────────────────────
+
+    @remind.command(name="channel", description="Set the channel where daily reminders are posted")
+    @discord.default_permissions(manage_guild=True)
+    async def remind_channel(
+        self,
+        ctx: discord.ApplicationContext,
+        channel: discord.Option(discord.TextChannel, "Channel to post reminders in", required=True),  # type: ignore[valid-type]
+    ):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        await db.set_reminder_channel(str(ctx.guild.id), str(channel.id))
+        await ctx.followup.send(
+            f"✅ Daily reminders will be posted in {channel.mention}.\n"
+            "They fire at **midnight local time** — set your timezone with `/remind timezone`.",
+            ephemeral=True,
+        )
+
+    # ── /remind timezone ──────────────────────────────────────────────────────
+
+    @remind.command(name="timezone", description="Set the server timezone for reminder timing")
+    @discord.default_permissions(manage_guild=True)
+    async def remind_timezone(
+        self,
+        ctx: discord.ApplicationContext,
+        tz: discord.Option(  # type: ignore[valid-type]
+            str,
+            "IANA timezone name — e.g. America/New_York, Europe/London, Asia/Kolkata",
+            required=True,
+        ),
+    ):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        try:
+            zone = ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, KeyError):
+            await ctx.followup.send(
+                f"❌ `{tz}` is not a valid IANA timezone name.\n"
+                "Examples: `UTC`  `America/New_York`  `Europe/London`  `Asia/Kolkata`  `Australia/Sydney`",
+                ephemeral=True,
+            )
+            return
+
+        await db.set_guild_timezone(str(ctx.guild.id), tz)
+        local_now = datetime.now(zone)
+        await ctx.followup.send(
+            f"✅ Timezone set to **{tz}**.\n"
+            f"Current local time: **{local_now.strftime('%I:%M %p')}** — "
+            "reminders fire at **12:00 AM (midnight)**.",
+            ephemeral=True,
+        )
+
+    # ── /remind status ────────────────────────────────────────────────────────
+
+    @remind.command(name="status", description="Check the current reminder configuration")
+    @discord.default_permissions(manage_guild=True)
+    async def remind_status(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        gid    = str(ctx.guild.id)
+        config = await db.get_guild_config(gid)
+
+        channel_mention: str | None = None
+        chan_id = config.get("reminder_channel_id")
+        if chan_id:
+            ch = ctx.guild.get_channel(int(chan_id))
+            channel_mention = ch.mention if ch else f"`#{chan_id} (deleted)`"
+
+        local_time_str: str | None = None
+        tz_name = config.get("timezone") or "UTC"
+        try:
+            local_time_str = datetime.now(ZoneInfo(tz_name)).strftime("%I:%M %p")
+        except Exception:
+            pass
+
+        player_count = len(await db.get_daily_players_for_reminder(gid))
+        embed = remind_status_embed(config, ctx.guild.name, channel_mention, local_time_str, player_count)
+        await ctx.followup.send(embed=embed, ephemeral=True)
+
+    # ── /remind test ──────────────────────────────────────────────────────────
+
+    @remind.command(name="test", description="Fire a test reminder to the configured channel right now")
+    @discord.default_permissions(manage_guild=True)
+    async def remind_test(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        gid    = str(ctx.guild.id)
+        config = await db.get_guild_config(gid)
+
+        if not config.get("reminder_channel_id"):
+            await ctx.followup.send(
+                "❌ No channel configured. Run `/remind channel #channel` first.",
+                ephemeral=True,
+            )
+            return
+
+        channel = ctx.guild.get_channel(int(config["reminder_channel_id"]))
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.followup.send(
+                "❌ Configured channel not found — run `/remind channel #channel` to update it.",
+                ephemeral=True,
+            )
+            return
+
+        today = date.today()
+        try:
+            await self._send_reminder(channel, ctx.guild, today.isoformat(), today.month, today.day)
+            await ctx.followup.send(
+                f"✅ Test reminder sent to {channel.mention}.", ephemeral=True
+            )
+        except discord.Forbidden:
+            await ctx.followup.send(
+                f"❌ Missing permissions to post in {channel.mention}.", ephemeral=True
+            )
+        except Exception as exc:
+            await ctx.followup.send(f"❌ Failed: {exc}", ephemeral=True)
+
+    # ── /remind off ───────────────────────────────────────────────────────────
+
+    @remind.command(name="off", description="Disable automatic daily reminders")
+    @discord.default_permissions(manage_guild=True)
+    async def remind_off(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Use this inside a server.", ephemeral=True)
+            return
+
+        await db.set_reminder_enabled(str(ctx.guild.id), False)
+        await ctx.followup.send(
+            "🔕 Automatic reminders disabled.\n"
+            "Run `/remind channel #channel` to re-enable.",
+            ephemeral=True,
+        )
 
     # ── Message-based guess input ─────────────────────────────────────────────
 
@@ -753,71 +913,6 @@ class WordleCog(commands.Cog):
                 )
 
         await ctx.followup.send(embed=embed)
-
-    # ── /wordle remind ────────────────────────────────────────────────────────
-
-    @wordle.command(name="remind", description="Send the daily reminder to this channel right now (admin)")
-    @discord.default_permissions(manage_guild=True)
-    async def remind(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
-        if ctx.guild is None:
-            await ctx.followup.send("Use this inside a server.")
-            return
-
-        gid         = str(ctx.guild.id)
-        today       = date.today()
-        players     = await db.get_daily_players_for_reminder(gid)
-        leaderboard = await db.get_leaderboard(gid, limit=10)
-        word_fact   = get_word_fact(today.month, today.day)
-        embeds      = reminder_embed(players, leaderboard, today.isoformat(), ctx.guild.name, word_fact)
-
-        content = (
-            _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
-            if players else "🌅 **Sigmordle is LIVE!** No daily players yet — be the first!"
-        )
-
-        first = True
-        for embed in embeds:
-            if first:
-                await ctx.followup.send(content=content, embed=embed)
-                first = False
-            else:
-                await ctx.followup.send(embed=embed)
-
-    # ── /wordle timezone ──────────────────────────────────────────────────────
-
-    @wordle.command(name="timezone", description="Set server timezone for daily reminders (admin only)")
-    @discord.default_permissions(manage_guild=True)
-    async def timezone_cmd(
-        self,
-        ctx: discord.ApplicationContext,
-        tz: discord.Option(  # type: ignore[valid-type]
-            str,
-            "IANA timezone name — e.g. America/New_York, Europe/London, Asia/Kolkata",
-            required=True,
-        ),
-    ):
-        await ctx.defer(ephemeral=True)
-        if ctx.guild is None:
-            await ctx.followup.send("Use this inside a server.", ephemeral=True)
-            return
-
-        try:
-            ZoneInfo(tz)
-        except (ZoneInfoNotFoundError, KeyError):
-            await ctx.followup.send(
-                f"❌ `{tz}` is not a valid IANA timezone name.\n"
-                "Examples: `UTC`  `America/New_York`  `Europe/London`  `Asia/Kolkata`  `Australia/Sydney`",
-                ephemeral=True,
-            )
-            return
-
-        await db.set_guild_timezone(str(ctx.guild.id), tz)
-        await ctx.followup.send(
-            f"✅ Timezone set to **{tz}**.\n"
-            f"Daily reminders will fire at **00:00 {tz}** each day.",
-            ephemeral=True,
-        )
 
     # ── /wordle server ────────────────────────────────────────────────────────
 

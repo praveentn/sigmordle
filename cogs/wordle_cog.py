@@ -48,16 +48,21 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def _build_mention_content(players: list[dict], prefix: str, cap: int = 2000) -> str:
-    """Build a message string with @mentions that never exceeds `cap` chars.
-    Stops adding mentions before the limit rather than cutting one in half."""
-    result = prefix
+def _build_mention_chunks(players: list[dict], prefix: str, cap: int = 2000) -> list[str]:
+    """Split all player @mentions into ≤cap-char chunks.
+    First chunk starts with `prefix`; subsequent chunks are mentions only."""
+    chunks: list[str] = []
+    current = prefix
     for p in players:
         token = f"<@{p['user_id']}> "
-        if len(result) + len(token) > cap:
-            break
-        result += token
-    return result.rstrip()
+        if len(current) + len(token) > cap:
+            chunks.append(current.rstrip())
+            current = token
+        else:
+            current += token
+    if current.rstrip():
+        chunks.append(current.rstrip())
+    return chunks
 
 
 def _elapsed(created_at: str) -> int:
@@ -312,12 +317,12 @@ async def _start_game(
         await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
         return None, "❌ I need the **Create Private Threads** permission in this channel."
     except discord.HTTPException:
-        try:
-            starter = await channel.send(f"🎮 **{user.display_name}** started a Wordle game!")
-            thread  = await starter.create_thread(name=thread_name, auto_archive_duration=1440)
-        except (discord.Forbidden, discord.HTTPException):
-            await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
-            return None, "❌ Couldn't create a thread. Check the bot's **Create Threads** permission."
+        await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
+        return None, (
+            "❌ Couldn't create a private thread. "
+            "Make sure the server has **Boost Level 2** and the bot has "
+            "**Create Private Threads** permission in this channel."
+        )
 
     mode_tag = "📅 Daily" if mode == "daily" else "🎲 Free Play"
     embed = game_embed(game, user.display_name)
@@ -401,6 +406,7 @@ class ReminderView(discord.ui.View):
         label="🎮 Play Daily",
         style=discord.ButtonStyle.success,
         custom_id="sigmordle:play_daily",
+        row=0,
     )
     async def play_daily_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
         await _handle_play_button(interaction, "daily")
@@ -409,9 +415,64 @@ class ReminderView(discord.ui.View):
         label="🎲 Free Play",
         style=discord.ButtonStyle.primary,
         custom_id="sigmordle:play_free",
+        row=0,
     )
     async def play_free_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
         await _handle_play_button(interaction, "freeplay")
+
+    @discord.ui.button(
+        label="🏆 Leaderboard",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sigmordle:leaderboard",
+        row=1,
+    )
+    async def leaderboard_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None:
+            await interaction.followup.send("This only works inside a server.", ephemeral=True)
+            return
+        rows  = await db.get_leaderboard(str(interaction.guild.id), limit=10)
+        embed = leaderboard_embed(rows, interaction.guild.name)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="📊 My Stats",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sigmordle:my_stats",
+        row=1,
+    )
+    async def my_stats_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None:
+            await interaction.followup.send("This only works inside a server.", ephemeral=True)
+            return
+        row = await db.get_user_stats(str(interaction.user.id), str(interaction.guild.id))
+        if not row:
+            await interaction.followup.send(
+                "You haven't played yet! Click **🎮 Play Daily** to start.", ephemeral=True
+            )
+            return
+        embed = stats_embed(row, interaction.user.display_name)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="📅 Daily Results",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sigmordle:daily_results",
+        row=1,
+    )
+    async def daily_results_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None:
+            await interaction.followup.send("This only works inside a server.", ephemeral=True)
+            return
+        gid   = str(interaction.guild.id)
+        uid   = str(interaction.user.id)
+        today = _today()
+        word  = get_daily_word(today)
+        rows  = await db.get_daily_results(gid, today)
+        embed = daily_results_embed(rows, word, interaction.guild.name, today, show_word=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -442,18 +503,20 @@ class WordleCog(commands.Cog):
         leaderboard = await db.get_leaderboard(str(guild.id), limit=10)
         word_fact   = get_word_fact(month, day)
         embeds      = reminder_embed(players, leaderboard, today_str, guild.name, word_fact)
-        content     = (
-            _build_mention_content(players, "🌅 **Sigmordle is LIVE!** ")
-            if players else "🌅 **Sigmordle is LIVE!**"
+        mention_chunks = (
+            _build_mention_chunks(players, "🌅 **Sigmordle is LIVE!** ")
+            if players else ["🌅 **Sigmordle is LIVE!**"]
         )
         first = True
         for embed in embeds:
             if first:
-                # Attach the play buttons only to the first message
-                await channel.send(content=content, embed=embed, view=ReminderView())
+                await channel.send(content=mention_chunks[0], embed=embed, view=ReminderView())
                 first = False
             else:
                 await channel.send(embed=embed)
+        # Ping any players that overflowed the first message's 2000-char content limit
+        for chunk in mention_chunks[1:]:
+            await channel.send(content=chunk)
 
     # ── Daily reminder background task ────────────────────────────────────────
 

@@ -246,6 +246,174 @@ class WordleView(discord.ui.View):
             item.disabled = True
 
 
+# ── Shared game-creation helper ───────────────────────────────────────────────
+
+async def _start_game(
+    guild: discord.Guild,
+    user: discord.Member,
+    channel: discord.TextChannel,
+    mode: str,
+    max_guesses: int = 6,
+) -> tuple[discord.Thread | None, str]:
+    """
+    Create a new game + private thread for `user` in `channel`.
+
+    Returns:
+      (thread, "")           — new game created successfully
+      (thread, "resumed")    — user had an active game; returned existing thread
+      (None,  "no_thread")   — active game exists but thread is gone
+      (None,  "played")      — daily already played today
+      (None,  "<error msg>") — permission / Discord error
+    """
+    uid   = str(user.id)
+    gid   = str(guild.id)
+    cid   = str(channel.id)
+    today = _today()
+
+    active = await db.get_active_game(uid, gid)
+    if active:
+        thread_id = active.get("thread_id")
+        if thread_id:
+            t = guild.get_channel_or_thread(int(thread_id))
+            if t:
+                return t, "resumed"
+        return None, "no_thread"
+
+    if mode == "daily":
+        if await db.check_daily_played(uid, gid, today):
+            return None, "played"
+        target = get_daily_word(today)
+    else:
+        target = get_random_word()
+
+    game_id = await db.create_game(uid, gid, cid, target, max_guesses, mode,
+                                   today if mode == "daily" else None)
+    game = WordleGame(
+        game_id=game_id, target=target, guesses=[], patterns=[],
+        status="active", max_guesses=max_guesses, mode=mode, entropy_log=[],
+    )
+
+    mode_emoji  = "📅" if mode == "daily" else "🎲"
+    thread_name = f"{mode_emoji} Wordle — {user.display_name}"
+    thread: discord.Thread | None = None
+
+    try:
+        thread = await channel.create_thread(
+            name=thread_name,
+            type=discord.ChannelType.private_thread,
+            auto_archive_duration=1440,
+            invitable=False,
+        )
+        try:
+            await thread.add_user(user)
+        except discord.HTTPException:
+            pass
+    except discord.Forbidden:
+        await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
+        return None, "❌ I need the **Create Private Threads** permission in this channel."
+    except discord.HTTPException:
+        try:
+            starter = await channel.send(f"🎮 **{user.display_name}** started a Wordle game!")
+            thread  = await starter.create_thread(name=thread_name, auto_archive_duration=1440)
+        except (discord.Forbidden, discord.HTTPException):
+            await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
+            return None, "❌ Couldn't create a thread. Check the bot's **Create Threads** permission."
+
+    mode_tag = "📅 Daily" if mode == "daily" else "🎲 Free Play"
+    embed = game_embed(game, user.display_name)
+    embed.description = (
+        f"🎮 **{mode_tag} — game on!**\n"
+        f"Guess the hidden 5-letter word in **{max_guesses}** "
+        f"{'try' if max_guesses == 1 else 'tries'}.\n\n"
+        "**Type your 5-letter word** — the board updates automatically.\n"
+        "Click **🏳️ Give Up** to forfeit."
+    )
+    board_msg = await thread.send(embed=embed, view=WordleView(uid, gid), file=board_file(game))
+    await db.update_thread_info(game_id, gid, str(thread.id), str(board_msg.id))
+    return thread, ""
+
+
+def _jump_view(guild_id: int, thread_id: int) -> discord.ui.View:
+    """A single link button that jumps directly to a thread."""
+    v = discord.ui.View()
+    v.add_item(discord.ui.Button(
+        label="Go to game →",
+        url=f"https://discord.com/channels/{guild_id}/{thread_id}",
+        style=discord.ButtonStyle.link,
+    ))
+    return v
+
+
+async def _handle_play_button(interaction: discord.Interaction, mode: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    if interaction.guild is None:
+        await interaction.followup.send("This only works inside a server.", ephemeral=True)
+        return
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.followup.send(
+            "❌ Games can only be created from a text channel.", ephemeral=True
+        )
+        return
+
+    thread, flag = await _start_game(
+        interaction.guild,
+        interaction.user,  # type: ignore[arg-type]
+        interaction.channel,
+        mode,
+    )
+
+    if flag == "resumed":
+        await interaction.followup.send(
+            f"You already have an active game! → {thread.mention}",
+            view=_jump_view(interaction.guild.id, thread.id),
+            ephemeral=True,
+        )
+    elif flag == "no_thread":
+        await interaction.followup.send(
+            "You have an active game but I can't find the thread. "
+            "Use `/wordle board` to locate it.",
+            ephemeral=True,
+        )
+    elif flag == "played":
+        await interaction.followup.send(
+            "✅ You've already played today's daily word!\n"
+            "Click **🎲 Free Play** for another round anytime.",
+            ephemeral=True,
+        )
+    elif thread is None:
+        await interaction.followup.send(flag, ephemeral=True)
+    else:
+        mode_tag = "📅 Daily" if mode == "daily" else "🎲 Free Play"
+        await interaction.followup.send(
+            f"🎮 **{mode_tag}** game ready! → {thread.mention}",
+            view=_jump_view(interaction.guild.id, thread.id),
+            ephemeral=True,
+        )
+
+
+class ReminderView(discord.ui.View):
+    """Persistent view attached to daily reminder messages — never times out."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="🎮 Play Daily",
+        style=discord.ButtonStyle.success,
+        custom_id="sigmordle:play_daily",
+    )
+    async def play_daily_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await _handle_play_button(interaction, "daily")
+
+    @discord.ui.button(
+        label="🎲 Free Play",
+        style=discord.ButtonStyle.primary,
+        custom_id="sigmordle:play_free",
+    )
+    async def play_free_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await _handle_play_button(interaction, "freeplay")
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class WordleCog(commands.Cog):
@@ -254,6 +422,7 @@ class WordleCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        bot.add_view(ReminderView())   # re-attach persistent view across restarts
         self.daily_reminder_task.start()
 
     def cog_unload(self):
@@ -270,7 +439,7 @@ class WordleCog(commands.Cog):
         day: int,
     ) -> None:
         """Build and send the reminder embeds to `channel`. Raises on Discord errors."""
-        players     = await db.get_daily_players_for_reminder(str(guild.id))
+        players     = await db.get_all_players_for_reminder(str(guild.id))
         leaderboard = await db.get_leaderboard(str(guild.id), limit=10)
         word_fact   = get_word_fact(month, day)
         embeds      = reminder_embed(players, leaderboard, today_str, guild.name, word_fact)
@@ -281,7 +450,8 @@ class WordleCog(commands.Cog):
         first = True
         for embed in embeds:
             if first:
-                await channel.send(content=content, embed=embed)
+                # Attach the play buttons only to the first message
+                await channel.send(content=content, embed=embed, view=ReminderView())
                 first = False
             else:
                 await channel.send(embed=embed)
@@ -414,7 +584,7 @@ class WordleCog(commands.Cog):
         except Exception:
             pass
 
-        player_count = len(await db.get_daily_players_for_reminder(gid))
+        player_count = len(await db.get_all_players_for_reminder(gid))
         embed = remind_status_embed(config, ctx.guild.name, channel_mention, local_time_str, player_count)
         await ctx.followup.send(embed=embed, ephemeral=True)
 
@@ -583,107 +753,36 @@ class WordleCog(commands.Cog):
             await ctx.followup.send("❌ Guesses must be between 1 and 10.", ephemeral=True)
             return
 
-        uid   = str(ctx.author.id)
-        gid   = str(ctx.guild.id)
-        cid   = str(ctx.channel.id)
-        today = _today()
+        uid = str(ctx.author.id)
+        gid = str(ctx.guild.id)
 
-        # Resume active game — link back to the existing thread
-        active = await db.get_active_game(uid, gid)
-        if active:
-            thread_id = active.get("thread_id")
-            if thread_id:
-                thread = ctx.guild.get_channel_or_thread(int(thread_id))
-                if thread:
-                    await ctx.followup.send(
-                        f"You already have an active game!  →  {thread.mention}",
-                        ephemeral=True,
-                    )
-                    return
-            # Thread gone — fall through to show inline board
-            game  = WordleGame.from_db(active)
-            embed = game_embed(game, ctx.author.display_name)
-            embed.set_footer(text="Couldn't find your game thread — use /wordle board")
-            await ctx.followup.send(embed=embed, view=WordleView(uid, gid), file=board_file(game), ephemeral=True)
-            return
+        thread, flag = await _start_game(ctx.guild, ctx.author, ctx.channel, mode, max_guesses)
 
-        if mode == "daily":
-            if await db.check_daily_played(uid, gid, today):
-                await ctx.followup.send(
-                    "✅ You already played today's daily word!\n"
-                    "Use `/wordle daily` to see results, or `/wordle play mode:freeplay` for another round.",
-                    ephemeral=True,
-                )
-                return
-            target = get_daily_word(today)
-        else:
-            target = get_random_word()
-
-        game_id = await db.create_game(uid, gid, cid, target, max_guesses, mode,
-                                        today if mode == "daily" else None)
-        game = WordleGame(
-            game_id=game_id, target=target, guesses=[], patterns=[],
-            status="active", max_guesses=max_guesses, mode=mode, entropy_log=[],
-        )
-
-        # Create private thread for this game
-        mode_emoji = "📅" if mode == "daily" else "🎲"
-        thread_name = f"{mode_emoji} Wordle — {ctx.author.display_name}"
-        thread = None
-
-        try:
-            thread = await ctx.channel.create_thread(
-                name=thread_name,
-                type=discord.ChannelType.private_thread,
-                auto_archive_duration=1440,
-                invitable=False,
-            )
-            try:
-                await thread.add_user(ctx.author)
-            except discord.HTTPException:
-                pass
-        except discord.Forbidden:
+        if flag == "resumed":
             await ctx.followup.send(
-                "❌ I need the **Create Private Threads** permission here.\n"
-                "Ask a server admin to grant it, or try a different channel.",
+                f"You already have an active game! → {thread.mention}",
                 ephemeral=True,
             )
-            await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
-            return
-        except discord.HTTPException:
-            # Fall back to public thread via a starter message
-            try:
-                starter = await ctx.channel.send(
-                    f"🎮 **{ctx.author.display_name}** started a Wordle game!"
-                )
-                thread = await starter.create_thread(
-                    name=thread_name,
-                    auto_archive_duration=1440,
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                await ctx.followup.send(
-                    "❌ Couldn't create a game thread in this channel. "
-                    "Make sure the bot has **Create Threads** permission.",
-                    ephemeral=True,
-                )
-                await db.update_game(game_id, gid, "[]", "[]", "[]", "cancelled")
-                return
-
-        # Send board inside the thread
-        mode_tag = "📅 Daily" if mode == "daily" else "🎲 Free Play"
-        embed = game_embed(game, ctx.author.display_name)
-        embed.description = (
-            f"🎮 **{mode_tag} — game on!**\n"
-            f"Guess the hidden 5-letter word in **{max_guesses}** {'try' if max_guesses == 1 else 'tries'}.\n\n"
-            "**Type your 5-letter word** — the board updates automatically.\n"
-            "Click **🏳️ Give Up** to forfeit."
-        )
-        board_msg = await thread.send(embed=embed, view=WordleView(uid, gid), file=board_file(game))
-        await db.update_thread_info(game_id, gid, str(thread.id), str(board_msg.id))
-
-        await ctx.followup.send(
-            f"🎮 Your game is ready!  →  {thread.mention}", ephemeral=True
-        )
+        elif flag == "no_thread":
+            active = await db.get_active_game(uid, gid)
+            game   = WordleGame.from_db(active)
+            embed  = game_embed(game, ctx.author.display_name)
+            embed.set_footer(text="Couldn't find your game thread — use /wordle board")
+            await ctx.followup.send(
+                embed=embed, view=WordleView(uid, gid), file=board_file(game), ephemeral=True
+            )
+        elif flag == "played":
+            await ctx.followup.send(
+                "✅ You already played today's daily word!\n"
+                "Use `/wordle daily` to see results, or `/wordle play mode:freeplay` for another round.",
+                ephemeral=True,
+            )
+        elif thread is None:
+            await ctx.followup.send(flag, ephemeral=True)
+        else:
+            await ctx.followup.send(
+                f"🎮 Your game is ready! → {thread.mention}", ephemeral=True
+            )
 
     # ── /wordle guess (slash fallback) ────────────────────────────────────────
 

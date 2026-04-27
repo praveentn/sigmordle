@@ -496,6 +496,19 @@ async def mark_reminder_sent(guild_id: str, date_str: str) -> None:
         )
 
 
+async def get_all_players_for_reminder(guild_id: str) -> list[dict]:
+    """All users who have ever played (any mode), ordered by current streak desc."""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT user_id, username, current_streak, total_points, games_played, games_won
+               FROM user_stats WHERE guild_id=$1
+               ORDER BY current_streak DESC, total_points DESC""",
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
+
 async def get_daily_players_for_reminder(guild_id: str) -> list[dict]:
     """All users who have ever played daily mode, ordered by current streak desc."""
     pool = await _get_pool()

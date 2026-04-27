@@ -24,20 +24,22 @@ from game.wordle import WordleGame
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 
-TILE  = 62       # tile width and height in pixels
-GAP   = 5        # gap between tiles
-PAD   = 12       # board outer padding
-FSIZE = 34       # font size for the letter
+TILE        = 74     # tile width and height in pixels
+GAP         = 6      # gap between tiles
+PAD         = 18     # board outer padding
+FSIZE       = 42     # font size for the letter
+TILE_RADIUS = 8      # rounded-corner radius for tiles
 
 # ── Keyboard layout constants ─────────────────────────────────────────────────
 
-KB_TILE  = 30    # keyboard key size (px)
-KB_GAP   = 3     # gap between keys
-KB_VSEP  = 10    # vertical gap between board and keyboard section
-KB_FSIZE = 15    # font size for key letters
+KB_TILE   = 38   # keyboard key size (px)
+KB_GAP    = 4    # gap between keys
+KB_VSEP   = 16   # vertical gap between board and keyboard section
+KB_FSIZE  = 20   # font size for key letters
+KB_RADIUS = 5    # rounded-corner radius for keys
 
-_QWERTY_ROWS    = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
-_KB_UNTRIED     = (129, 131, 132)   # #818384 — not yet guessed
+_QWERTY_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
+_KB_UNTRIED  = (129, 131, 132)   # #818384 — not yet guessed
 
 # ── Wordle dark-theme palette ─────────────────────────────────────────────────
 
@@ -99,11 +101,20 @@ def _make_tile(letter: str | None, state: int | None) -> Image.Image:
     draw = ImageDraw.Draw(img)
 
     if state is None:
-        # Empty slot — dark background + grey outline
-        draw.rectangle([1, 1, TILE - 2, TILE - 2], outline=_DARKGREY, width=2)
+        # Empty slot — dark background + grey rounded outline
+        draw.rounded_rectangle(
+            [1, 1, TILE - 2, TILE - 2],
+            radius=TILE_RADIUS - 1,
+            outline=_DARKGREY,
+            width=2,
+        )
     else:
         fill = _STATE_COLOR.get(state, _DARKGREY)
-        draw.rectangle([0, 0, TILE - 1, TILE - 1], fill=fill)
+        draw.rounded_rectangle(
+            [0, 0, TILE - 1, TILE - 1],
+            radius=TILE_RADIUS,
+            fill=fill,
+        )
         if letter:
             f    = _font(FSIZE)
             bbox = draw.textbbox((0, 0), letter, font=f)
@@ -131,7 +142,11 @@ _kb_tile_cache: dict[tuple, Image.Image] = {}
 def _make_kb_tile(letter: str, colour: tuple) -> Image.Image:
     img  = Image.new("RGB", (KB_TILE, KB_TILE), _BG)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([0, 0, KB_TILE - 1, KB_TILE - 1], fill=colour)
+    draw.rounded_rectangle(
+        [0, 0, KB_TILE - 1, KB_TILE - 1],
+        radius=KB_RADIUS,
+        fill=colour,
+    )
     f    = _font(KB_FSIZE)
     bbox = draw.textbbox((0, 0), letter, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]

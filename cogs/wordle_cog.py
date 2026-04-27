@@ -422,7 +422,6 @@ class WordleCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        bot.add_view(ReminderView())   # re-attach persistent view across restarts
         self.daily_reminder_task.start()
 
     def cog_unload(self):
@@ -499,6 +498,8 @@ class WordleCog(commands.Cog):
     @daily_reminder_task.before_loop
     async def before_daily_reminder(self):
         await self.bot.wait_until_ready()
+        # Register after the event loop is running — View.__init__ needs it
+        self.bot.add_view(ReminderView())
 
     # ── /remind channel ───────────────────────────────────────────────────────
 

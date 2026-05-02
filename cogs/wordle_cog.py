@@ -26,6 +26,7 @@ from discord import SlashCommandGroup
 log = logging.getLogger(__name__)
 
 from utils import database as db
+from utils.external_leaderboard import post_points as _post_external_points
 from utils.words import (
     get_daily_word, get_random_word,
     compute_expected_entropy, information_gained,
@@ -140,6 +141,15 @@ async def _apply_guess(
         )
         if game.mode == "daily":
             await db.update_server_stats(guild_id, game.is_won, today)
+
+        if points > 0:
+            await _post_external_points(
+                user_id=int(user_id),
+                guild_id=int(guild_id),
+                username=username,
+                points=points,
+                match_id=game.game_id,
+            )
 
     return points, elapsed
 

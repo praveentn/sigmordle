@@ -89,10 +89,12 @@ EXTERNAL_LEADERBOARDS=SIGMAFEUD,NAVI
 SIGMAFEUD_ENABLED=true
 SIGMAFEUD_URL=https://sigmafeud-production.up.railway.app
 SIGMAFEUD_API_KEY=your_sigmafeud_key_here
+# SIGMAFEUD_GUILDS=976816967161892976,1096691415431516221   # omit = all servers
 
 NAVI_ENABLED=false
 NAVI_URL=https://navi.example.com
 NAVI_API_KEY=your_navi_key_here
+# NAVI_GUILDS=976816967161892976                           # omit = all servers
 ```
 
 **How to find your Server ID:** Right-click your server icon in Discord → **Copy Server ID**
@@ -196,3 +198,4 @@ The `/health` endpoint returns a JSON status object useful for uptime monitors:
 | `{NAME}_ENABLED` | No | `false` | Enable a named external service |
 | `{NAME}_URL` | No | — | Base URL for the service |
 | `{NAME}_API_KEY` | No | — | Bearer token for the service |
+| `{NAME}_GUILDS` | No | — | Comma-separated guild IDs to forward points from; omit to forward from all servers |
